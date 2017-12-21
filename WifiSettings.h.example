@@ -1,0 +1,7 @@
+/*
+ * Credentials for Wifi. Copy this example file to WifiSetting.h and update the parameters 
+ * for your network.
+ */
+
+#define SSIDNAME "Arduino!"
+#define SSIDPWD "Arduino!"

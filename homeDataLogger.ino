@@ -7,7 +7,6 @@
 //LOGINTERVAL is in seconds- takes about 1 second to do a log
 #include <SPI.h>
 #include <SD.h>
-#include <math.h>
 
 const int chipSelect = 10;
 File fhandle;
@@ -43,9 +42,9 @@ int DHTstatus=0;
 #define US_TIMEOUT_4M 23200  // Timeout for 2m
 
 //for WIFI, including SSID name and password and most HTML pages
+#include "WifiSettings.h"
+
 #define WIFI Serial
-#define SSIDNAME "PJIHOME"
-#define SSIDPWD "Arduino!"
 #define HTTPINDEX "HTTP/1.x 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>WIFI DATALOGGER</h2><br>Choose a link:<br><a href=\"DATA.CSV\">Download DATA.CSV</a><br><a href=\"SPARSE.CSV\">Sparse Data file</a><br><a href=\"RECENT.CSV\">Most recent data</a><br>"
 #define HTTP404 "HTTP/1.x 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br>"
 #define HTTPCSV "HTTP/1.x 200 OK\r\nContent-Type: text/csv\r\nConnection: close\r\n\r\n"
