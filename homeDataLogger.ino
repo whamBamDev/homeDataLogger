@@ -1,6 +1,7 @@
-//Environmental Datalogger- Temperature, humidity and light logged with time to SD card
 //outputs CSV data that can be opened by Excel, time is stored as serial number accurate to ~1second
 //WIFI webserver to dynamically download data
+
+#include <avr/pgmspace.h>
 
 //Needed for SD card
 //Uses hardware SPI on D10,D11,D12,D13
@@ -10,9 +11,15 @@
 
 const int chipSelect = 10;
 File fhandle;
-#define FILENAME "DATA.CSV"
+//#define FILENAME "DATA_%02d_%04d.CSV"
+#define FILENAME "D%02d_%04d.CSV"
 #define LOGINTERVAL 60
 #define LIGHTPIN A0
+
+#define TEMP_A_PIN A0
+#define TEMP_B_PIN A1
+#define TEMP_C_PIN A2
+#define TEMP_D_PIN A3
 
 //Needed for RTC
 //Uses SCL and SDA aka A4 and A5
@@ -25,7 +32,7 @@ RTC_DS1307 rtc;
 #define LED1 4
 #define LED2 3
 long tmout;   //keeps track of logging interval
-int temp,hum,light,distance;   //variables to log
+int temp,hum,light;   //variables to log
 int status=0;     //to display status info on webpage
 
 //for DHT11 interface
@@ -35,11 +42,14 @@ byte DHTtemp,DHThum;
 int DHTstatus=0;
 
 // UltraSonic module
-#define TRIG 7
-#define ECHO 6
+#define USONIC_1_TRIG 7
+#define USONIC_1_ECHO 6
+#define USONIC_2_TRIG 9
+#define USONIC_2_ECHO 8
 #define USMAX 3000  //??
-#define US_TIMEOUT 11600  // Timeout for 2m
-#define US_TIMEOUT_4M 23200  // Timeout for 2m
+#define USTIMEOUT_2M   11600  // Timeout for 2m
+#define US_TIMEOUT_2_5M 14500  // Timeout for 2.5m
+#define US_TIMEOUT_4M   23200  // Timeout for 2m
 
 //for WIFI, including SSID name and password and most HTML pages
 #include "WifiSettings.h"
@@ -50,52 +60,64 @@ int DHTstatus=0;
 #define HTTPCSV "HTTP/1.x 200 OK\r\nContent-Type: text/csv\r\nConnection: close\r\n\r\n"
 #define STATUSTITLE "<br>Status (zero is no error):"
 
+
+
+//#define DEBUG_CONSOLE true
+#define DEBUG_CONSOLE false
+#include "debug.h"
+
+const char LOG_MSG_STARTUP[] PROGMEM = "Setup Starting %d";
+const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
+
+Debug logger = Debug("dataLogger.log", DEBUG_CONSOLE);
+
 // sketch needs ~450 bytes local space to not crash
 #define PKTSIZE 257
-#define SBUFSIZE 20
+#define SBUFSIZE 30
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
 int cxn=-1;                 //connection number
 char pktbuf[PKTSIZE]="";    //to consolidate data for sending
-char ok[]="OK\r\n";         //OK response is very common
+const char ok[] PROGMEM = "OK\r\n";         //OK response is very common
+
+const char SEND_OK[] PROGMEM = "SEND OK";         //OK response is very common
+
+const char SEND_DATA[] PROGMEM = "AT+CIPSEND=";
+
+const char COMMA[] = ",";
 
 void setup() {
-//  WIFI.begin(115200);   //start serial port for WIFI
-  WIFI.begin(9600);   //start serial port for WIFI
-  WIFI.println("Setup Starting ");
+  WIFI.begin(115200);   //start serial port for WIFI
 
-  usonicsetup(); //set up ultrasonic sensor
-  WIFI.println("Setup Starting 1");
+  logger.printfln(LOG_MSG_STARTUP,0);
 
- //  wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
+  usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
+
+  wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
   DHTsetup();           //start temp/humidity sensor
-  WIFI.println("Setup Starting 2");
+  logger.printfln(LOG_MSG_STARTUP,2);
   pinMode(LED2,OUTPUT);
   digitalWrite(LED2,HIGH);      //turn on LED to show card in use
   if(!SD.begin(chipSelect)){    //SD card not responding
-    WIFI.println("Setup Starting - no sd");
+    logger.printfln("Setup Starting - no sd");
     errorflash(1);              //flash error code for card not found
   }
 
-  WIFI.println("Setup Starting 3");
+  logger.printfln(LOG_MSG_STARTUP,3);
   if (!rtc.begin()) {           // rtc not responding
     errorflash(2);              //flash error code for RTC not found
   }
 
     // Use the compile date/time, change to use 
 //  if (! rtc.initialized()) {
-    WIFI.println("RTC check time");
+    logger.printfln(F("RTC check time"));
     DateTime now = rtc.now();
     DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
 
-    WIFI.print("compile time = ");
-    WIFI.print(compileTime.secondstime());
-    WIFI.print("now time = ");
-    WIFI.println(now.secondstime());
+    logger.printfln(F("compile time = %i, now time = %i"), compileTime.secondstime(), now.secondstime());
     if( compileTime.secondstime() > now.secondstime()) {
       // following line sets the RTC to the date & time this sketch was compiled
-      WIFI.print("RTC setting time");
-      WIFI.println(compileTime.secondstime());
+      logger.printfln(F("RTC setting time to %d"),compileTime.secondstime());
       rtc.adjust(compileTime);
     }
 //  }
@@ -104,83 +126,63 @@ void setup() {
     errorflash(3);              //flash error code for RTC not running
   }
 
-  fhandle = SD.open(FILENAME, FILE_WRITE);
+  logger.printfln(LOG_MSG_STARTUP,5);
+  fhandle = openDataFile();
   if(!fhandle){                 //if file able to be opened
+  logger.printfln(LOG_MSG_STARTUP,7);
     errorflash(4);              //flash error code for file not opened
   }
-  unsigned int s;
-  s=fhandle.size();             //get file size
-  if(!s){                       //if file is empty, add column headers
-    addheaders();    
-  }
+
   fhandle.close();              //close file so data is saved
-  tmout=millis();
-  getvalue();
-  logtocard();                  //log some data immediately
-  WIFI.println("Setup Complete ");
+
+  logger.printfln(LOG_MSG_STARTUP,1000);
 }
 
 void loop() {
 //  if(millis()>tmout+LOGINTERVAL*1000L){   //if it's been more than logging interval
   if(millis()>tmout+LOGINTERVAL*100L){   //if it's been more than logging interval
-    WIFI.println("Sampling ");
+    logger.printfln(F("Sampling "));
     getvalue();                           //fetch data to log
 //    tmout=tmout+LOGINTERVAL*1000L;        //add interval, so interval is precise
-    WIFI.println("Temp complete, distance check");
-    distance=usonic(US_TIMEOUT_4M)/57; //distance in cm, time out at 11600us or 2m maximum range
-    WIFI.print("Distance = ");
-    WIFI.println(distance);
+    logger.printfln(F("Temp complete, distance check"));
+    int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
+    logger.printfln(F("Distance = %d"), distanceA);
 
-    WIFI.print("Analog temp1 = ");
-    WIFI.println(Thermister(analogRead(1)));
+    //light=analogRead(LIGHTPIN);     //get light sensor data
+    float temperatureA = readThermister(TEMP_A_PIN);
+    float temperatureB = readThermister(TEMP_B_PIN);
+    float temperatureC = readThermister(TEMP_C_PIN);
+    float temperatureD = readThermister(TEMP_D_PIN);
+    logger.printf(LOG_MSG_TEMP_VALUE,1,(100*temperatureA));
+    logger.printf(LOG_MSG_TEMP_VALUE,2,temperatureB);
+    logger.printf(LOG_MSG_TEMP_VALUE,3,temperatureC);
+    logger.printfln(LOG_MSG_TEMP_VALUE,4,temperatureD);
 
-    WIFI.print("Analog temp2 = ");
-    WIFI.println(Thermister(analogRead(2)));
+    logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, -1);          //log it
+    logger.printfln(F("Sampled"));
 
-    logtocard();                          //log it
-    WIFI.println("Sampled");
-
-    tmout=tmout+LOGINTERVAL*100L;        //add interval, so interval is precise
+    tmout=tmout+LOGINTERVAL*1000L;        //add interval, so interval is precise
   }
   checkwifi();  
 }
 
-double Thermister(int RawADC) {
-  double Temp;
-  Temp = log(((10240000/RawADC) - 10000));
-  Temp = 1 / (0.001129148 + (0.000234125 + (0.0000000876741 * Temp * Temp ))* Temp );
-  Temp = Temp - 273.15; // Convert Kelvin to Celcius
-  return Temp;
-}
-
-
-void checkwifi(){
-  /*
-  while(WIFI.available()){                    //check if any data from WIFI
-    int d;
-    d=WIFI.read();
-    if((d>47)&&(d<58)&&(cxn<0)){cxn=d-48;}    //connection number, could come from IPD or CONNECT
-    if(d==':'){digitalWrite(LED2,HIGH);dorequest();digitalWrite(LED2,LOW);}                  //: means end of IPD data, content follows. LED on while busy
-  }
-  */
+double readThermister(int pin) {
+  int rawADC;
+  double temp;
+  rawADC = analogRead(pin);
+  temp = log(((10240000/rawADC) - 10000));
+  temp = 1 / (0.001129148 + (0.000234125 + (0.0000000876741 * temp * temp ))* temp );
+  temp = temp - 273.15; // Convert Kelvin to Celcius
+  return temp;
 }
 
 void getvalue(){                  //put subroutine for getting data to log here
   DHTtemp=0;                      //zero values to detect errors
   DHThum=0;
-  light=analogRead(LIGHTPIN);     //get light sensor data
   DHTstatus=DHT11();              //DHTstatus=0 if error
   temp=DHTtemp;                   //DHT11() loads temp into DHTtemp      
   hum=DHThum;                     //DHT11() loads humidity into DHThum
-  WIFI.print("status =  ");
-  WIFI.print(DHTstatus);
-  WIFI.print(", temp =  ");
-  WIFI.print(temp);
-  WIFI.print(", humidty =  ");
-  WIFI.print(hum);
-  WIFI.print(", light =  ");
-  WIFI.println(light);
-
+  logger.printfln(F("status = %d, temp = %d, humidty = %d"),DHTstatus,temp,hum);
 }
 
 void errorflash(int n){           //non-recoverable error, flash code on LED1
@@ -198,19 +200,45 @@ void errorflash(int n){           //non-recoverable error, flash code on LED1
   }  
 }
 
-void addheaders(){      //put the column headers you would like here, if you don't want headers, comment out the line below
-  fhandle.println(F("\"Time and Date\",\"Temperature\",\"Humidity\",\"Light\",\"Distance\""));
+// TODO: rename to sprintf.
+const char * createFilename( const char *format, ...){
+  va_list args;
+  va_start(args, format);
+  vsnprintf(fname, sizeof(fname), format, args);
+  va_end(args);
+  return fname;  
 }
 
-void logtocard(){
+File openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
+  DateTime now = rtc.now();                   //capture time
+
+  const char *filename = createFilename( FILENAME, now.month(), now.year());
+  logger.printfln(F("opening data file %s"), filename);
+
+  fhandle = SD.open(filename, FILE_WRITE);
+  unsigned int s;
+  s=fhandle.size();             //get file size
+  if(!s){                       //if file is empty, add column headers
+    addheaders();    
+  }
+  return fhandle;
+}
+
+
+void addheaders(){      //put the column headers you would like here, if you don't want headers, comment out the line below
+  fhandle.println(F("\"Time and Date\",\"Temperature Outside\",\"Humidity Outside\",\"Temperature A\",\"Temperature B\",\"Temperature C\",\"Temperature D\",\"Depth A\",\"Depth B\",\"Light\""));
+}
+
+void logtocard(float temperatureA, float temperatureB, float temperatureC, float temperatureD, int distanceA, int distanceB){
   unsigned long timestamp;
   DateTime now = rtc.now();                   //capture time
   timestamp=now.unixtime();
-  WIFI.print("timestamp =  ");
-  WIFI.println(timestamp);
+  logger.printfln(F("timestamp = %d"),timestamp);
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
-  fhandle = SD.open(FILENAME, FILE_WRITE);
+  
+  fhandle = openDataFile();
+  
   fhandle.print(timestamp/86400L+25569L);     //write timestamp to card, integer part, converted to Excel time serial number with resolution of ~1 second
   fhandle.print(".");                         //decimal point
   timestamp=timestamp%86400;                  //fractions of a day only
@@ -220,14 +248,25 @@ void logtocard(){
   fhandle.write(((timestamp/100)%10)+'0');
   fhandle.write(((timestamp/10)%10)+'0');
   fhandle.write(((timestamp)%10)+'0');
-  fhandle.print(",");
+  fhandle.print(COMMA);
   if(DHTstatus){fhandle.print(temp);}         //put data if valid otherwise blank (will be blank cell in Excel)
-  fhandle.print(",");
+  fhandle.print(COMMA);
   if(DHTstatus){fhandle.print(hum);}          //put data if valid otherwise blank
-  fhandle.print(",");
+  fhandle.print(COMMA);
+  fhandle.print(temperatureA);
+  fhandle.print(COMMA);
+  fhandle.print(temperatureB);
+  fhandle.print(COMMA);
+  fhandle.print(temperatureC);
+  fhandle.print(COMMA);
+  fhandle.print(temperatureD);
+  fhandle.print(COMMA);
+  fhandle.print(distanceA);
+  fhandle.print(COMMA);
+  fhandle.print(distanceB);
+  fhandle.print(COMMA);
   fhandle.print(light);                       //put data (can't validate analog input)
-  fhandle.print(",");
-  fhandle.print(distance);                       //put data (can't validate analog input)
+
   if(!fhandle.println()){                     //if we can't write data, there's a problem with card (probably full)
     fhandle.close();                          //close file to save the data we have
     errorflash(5);                            //error code
@@ -247,6 +286,11 @@ int DHT11(){                    //returns 1 on ok, 0 on fail (eg checksum, data 
   unsigned long t;              //time
   byte old=0;
   byte newd;
+
+  // Set the values 
+  DHTtemp=-1;
+  DHThum=-1;
+  
   for(int i=0;i<83;i++){n[i]=0;}
   digitalWrite(DHT11PIN,LOW);   //start signal
   delay(25);
@@ -455,8 +499,9 @@ void sendcsvrecent(int n){                    //only send header line and last n
   fhandle.close();
 }
 
-  
+
 void wifiinit(){
+#if DEBUG_CONSOLE == false
   WIFIcmd("AT+RST","ready\r\n",5000);                                               //reset
   WIFIcmd("AT+CWQAP",ok,5000);                                                      //exit any AP's
   WIFIcmd("AT+CWJAP=\""  SSIDNAME  "\",\"" SSIDPWD  "\"","WIFI GOT IP\r\n",10000);  //join AP
@@ -465,8 +510,20 @@ void wifiinit(){
   WIFIcmd("AT+CIPMUX=1",ok,2000);                                                   //MUX on (needed for server)
   WIFIcmd("AT+CIPSERVER=1,80",ok,2000);                                             //server on
   WIFIcmd("AT+CIPSTO=5",ok,2000);                                                   //disconnect after x time if no data
+#endif    
 }
 
+void checkwifi(){
+#if DEBUG_CONSOLE == false
+  while(WIFI.available()){                    //check if any data from WIFI
+    int d;
+    d=WIFI.read();
+    if((d>47)&&(d<58)&&(cxn<0)){cxn=d-48;}    //connection number, could come from IPD or CONNECT
+    if(d==':'){digitalWrite(LED2,HIGH);dorequest();digitalWrite(LED2,LOW);}                  //: means end of IPD data, content follows. LED on while busy
+  }
+#endif    
+}
+  
 int WIFIcmd(char* c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
   long t;
   WIFI.println(c);
@@ -480,14 +537,15 @@ int WIFIcmd(char* c,char* r,long tmout){   //command c (nocrlf needed), returns 
 }
 
 void WIFIsenddata(char* d,int client){    //send data to client
+//
   WIFI.print(F("AT+CIPSEND="));           //send data
   WIFI.print(client);                     //to client
-  WIFI.print(",");              
+  WIFI.print(F(","));              
   WIFI.println(strlen(d));                //data has length
   //delay(50);
   WIFI.find(">");
   WIFI.print(d);                          //data
-  //delay(350);
+  delay(350);
   WIFI.find("SEND OK");
   WIFIpurge();                            //clear incoming buffer
 }
@@ -564,47 +622,33 @@ int addtobuffer(char buf[], int bufsize, long n){      //add n as string to end 
   return p;                                             //number of characters added  
 }
 
-void usonicsetup(void){
-  pinMode(ECHO, INPUT);
-  pinMode(TRIG, OUTPUT);
-  digitalWrite(TRIG, LOW);
+void usonicSetup(int trigPin, int echoPin){
+  pinMode(echoPin, INPUT);
+  pinMode(trigPin, OUTPUT);
+  digitalWrite(trigPin, LOW);
 }
 
-long usonic(long utimeout){ //utimeout is maximum time to wait for return in us
+long usonicRead(int trigPin, int echoPin, long utimeout){ //utimeout is maximum time to wait for return in us
   long b;
 
-  if(digitalRead(ECHO)==HIGH){return 0;} //if echo line is still low from last result, return 0;
+  if(digitalRead(echoPin)==HIGH){return -1;} //if echo line is still low from last result, return 0;
 
-  digitalWrite(TRIG, HIGH); //send trigger pulse
+  digitalWrite(trigPin, HIGH); //send trigger pulse
   delay(1);
-  digitalWrite(TRIG, LOW);
+  digitalWrite(trigPin, LOW);
 
   long utimer=micros();
 
-  while((digitalRead(ECHO)==LOW)&&((micros()-utimer)<1000)){} //wait for pin state to change- return starts after 460us typically or timeout (eg if not connected)
-
+  while((digitalRead(echoPin)==LOW)&&((micros()-utimer)<1000)){} //wait for pin state to change- return starts after 460us typically or timeout (eg if not connected)
   utimer=micros();
 
-  while((digitalRead(ECHO)==HIGH)&&((micros()-utimer)<utimeout)){} //wait for pin state to change
-
+  while((digitalRead(echoPin)==HIGH)&&((micros()-utimer)<utimeout)){} //wait for pin state to change
   b=micros()-utimer;
  
-  if(b==0){b=utimeout;}
+  if(b==0){return -1;}
+//  if(b==0){b=utimeout;}
 
-
-  // check for an echo
-  while((digitalRead(ECHO)==LOW)&&((micros()-utimer)<1000)){} //wait for pin state to change- return starts after 460us typically or timeout (eg if not connected)
-  utimer=micros();
-  while((digitalRead(ECHO)==HIGH)&&((micros()-utimer)<utimeout)){} //wait for pin state to change
-  int c=micros()-utimer;
-  
-  WIFI.print("d1 = ");
-  WIFI.print((b/58));
-  WIFI.print("d2 = ");
-  WIFI.print((c/58));
-
-
-
-  return b;
+  return b/58;
 }
+
 
