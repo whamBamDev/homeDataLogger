@@ -12,7 +12,15 @@
 const int chipSelect = 10;
 File fhandle;
 //#define FILENAME "DATA_%02d_%04d.CSV"
-#define FILENAME "D%02d_%04d.CSV"
+#define FILENAME "D%02d_%04d.js"
+//#define JSON_START F("[\r\n")
+//#define JSON_END F("\r\n]")
+//const char JSON_START[] PROGMEM = "[\r\n";
+//const char JSON_END[] PROGMEM = "\r\n]";
+const char JSON_START[] = "[\r\n";
+const char JSON_END[] = "\r\n]";
+
+
 #define LOGINTERVAL 60
 #define LIGHTPIN A0
 
@@ -55,15 +63,15 @@ int DHTstatus=0;
 #include "WifiSettings.h"
 
 #define WIFI Serial
-#define HTTPINDEX "HTTP/1.x 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>WIFI DATALOGGER</h2><br>Choose a link:<br><a href=\"DATA.CSV\">Download DATA.CSV</a><br><a href=\"SPARSE.CSV\">Sparse Data file</a><br><a href=\"RECENT.CSV\">Most recent data</a><br>"
-#define HTTP404 "HTTP/1.x 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br>"
-#define HTTPCSV "HTTP/1.x 200 OK\r\nContent-Type: text/csv\r\nConnection: close\r\n\r\n"
+#define HTTPINDEX "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>WIFI DATALOGGER</h2><br>Choose a link:<br><a href=\"DATA.CSV\">Download DATA.CSV</a><br><a href=\"SPARSE.CSV\">Sparse Data file</a><br><a href=\"RECENT.CSV\">Most recent data</a><br>"
+#define HTTP404 "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br>"
+#define HTTPCSV "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nConnection: close\r\n\r\n"
 #define STATUSTITLE "<br>Status (zero is no error):"
 
 
 
-//#define DEBUG_CONSOLE true
-#define DEBUG_CONSOLE false
+#define DEBUG_CONSOLE true
+//#define DEBUG_CONSOLE false
 #include "debug.h"
 
 const char LOG_MSG_STARTUP[] PROGMEM = "Setup Starting %d";
@@ -76,6 +84,7 @@ Debug logger = Debug("dataLogger.log", DEBUG_CONSOLE);
 #define SBUFSIZE 30
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
+char currentFilename[SBUFSIZE]="";    //filename
 int cxn=-1;                 //connection number
 char pktbuf[PKTSIZE]="";    //to consolidate data for sending
 const char ok[] PROGMEM = "OK\r\n";         //OK response is very common
@@ -113,6 +122,7 @@ void setup() {
     logger.printfln(F("RTC check time"));
     DateTime now = rtc.now();
     DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
+//      rtc.adjust(compileTime);
 
     logger.printfln(F("compile time = %i, now time = %i"), compileTime.secondstime(), now.secondstime());
     if( compileTime.secondstime() > now.secondstime()) {
@@ -214,60 +224,73 @@ File openDataFile(){      //put the column headers you would like here, if you d
 
   const char *filename = createFilename( FILENAME, now.month(), now.year());
   logger.printfln(F("opening data file %s"), filename);
+  if( strcmp(filename,currentFilename) == 0) {
+    File currenFile = SD.open(currentFilename, FILE_WRITE);
+    currenFile.print(JSON_END);
+    currenFile.close();
+    strcpy(currentFilename,filename);
+  }
 
   fhandle = SD.open(filename, FILE_WRITE);
-  unsigned int s;
-  s=fhandle.size();             //get file size
-  if(!s){                       //if file is empty, add column headers
-    addheaders();    
-  }
   return fhandle;
 }
 
 
-void addheaders(){      //put the column headers you would like here, if you don't want headers, comment out the line below
-  fhandle.println(F("\"Time and Date\",\"Temperature Outside\",\"Humidity Outside\",\"Temperature A\",\"Temperature B\",\"Temperature C\",\"Temperature D\",\"Depth A\",\"Depth B\",\"Light\""));
-}
-
 void logtocard(float temperatureA, float temperatureB, float temperatureC, float temperatureD, int distanceA, int distanceB){
   unsigned long timestamp;
   DateTime now = rtc.now();                   //capture time
-  timestamp=now.unixtime();
   logger.printfln(F("timestamp = %d"),timestamp);
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
   
   fhandle = openDataFile();
-  
-  fhandle.print(timestamp/86400L+25569L);     //write timestamp to card, integer part, converted to Excel time serial number with resolution of ~1 second
-  fhandle.print(".");                         //decimal point
-  timestamp=timestamp%86400;                  //fractions of a day only
-  fhandle.write(((timestamp/8640)%10)+'0');   //print decimal parts
-  fhandle.write(((timestamp/864)%10)+'0');
-  timestamp=((timestamp%864)*125)/108;        //simplified 1000/864
-  fhandle.write(((timestamp/100)%10)+'0');
-  fhandle.write(((timestamp/10)%10)+'0');
-  fhandle.write(((timestamp)%10)+'0');
-  fhandle.print(COMMA);
-  if(DHTstatus){fhandle.print(temp);}         //put data if valid otherwise blank (will be blank cell in Excel)
-  fhandle.print(COMMA);
-  if(DHTstatus){fhandle.print(hum);}          //put data if valid otherwise blank
-  fhandle.print(COMMA);
-  fhandle.print(temperatureA);
-  fhandle.print(COMMA);
-  fhandle.print(temperatureB);
-  fhandle.print(COMMA);
-  fhandle.print(temperatureC);
-  fhandle.print(COMMA);
-  fhandle.print(temperatureD);
-  fhandle.print(COMMA);
-  fhandle.print(distanceA);
-  fhandle.print(COMMA);
-  fhandle.print(distanceB);
-  fhandle.print(COMMA);
-  fhandle.print(light);                       //put data (can't validate analog input)
 
-  if(!fhandle.println()){                     //if we can't write data, there's a problem with card (probably full)
+  unsigned long s;
+  s=fhandle.size();             //get file size
+   logger.printfln(F("size %d - %d - %d"),s,strlen(JSON_START),strlen(JSON_END));
+  if(!s){                       //if file is empty, add column headers
+    logger.printfln(F("new file"));
+    fhandle.print(JSON_START);
+  } else {
+    fhandle.println(COMMA);
+  }
+    
+  // Timestamo format ISO 8601: 2017-12-26T07:44:19Z
+  fhandle.print(F(" {\r\n  \"sampleTime\": \"")); //write timestamp to card, integer part, converted to Excel time serial number with resolution of ~1 second
+  createFilename("%04d-%02d-%02d",now.year(),now.month(),now.day());
+  logger.printfln(F("sample date = %s"),fname);
+  fhandle.print(fname);
+  fhandle.print(F("T"));
+  createFilename("%02d:%02d:%02d",now.hour(),now.minute(),now.second());
+  logger.printfln(F("sample time = %s"),fname);
+  fhandle.print(fname);
+  fhandle.println(F("Z\","));
+
+  fhandle.print(F("  \"outside\": { \"temperature\": "));
+  if(DHTstatus){fhandle.print(temp);}         //put data if valid otherwise blank (will be blank cell in Excel)
+  fhandle.print(F(", \"humidity\": "));
+  if(DHTstatus){fhandle.print(hum);}          //put data if valid otherwise blank
+  fhandle.print(F(", \"lightLevel\": "));
+  fhandle.print(light);                       //put data (can't validate analog input)
+  fhandle.println(F("},"));
+
+  fhandle.print(F("  \"inside\": { \"temperatureA\": "));
+  fhandle.print(temperatureA);
+  fhandle.print(F(", \"temperatureB\": "));
+  fhandle.print(temperatureB);
+  fhandle.print(F(", \"temperatureC\": "));
+  fhandle.print(temperatureC);
+  fhandle.print(F(", \"temperatureD\": "));
+  fhandle.print(temperatureD);
+  fhandle.println(F("},"));
+
+  fhandle.print(F("  \"waterTank\": { \"emptySpaceA\": "));
+  fhandle.print(distanceA);
+  fhandle.print(F(", \"emptySpaceB\": "));
+  fhandle.print(distanceB);
+  fhandle.println(F("}"));
+
+  if(!fhandle.print(F(" }"))){                     //if we can't write data, there's a problem with card (probably full)
     fhandle.close();                          //close file to save the data we have
     errorflash(5);                            //error code
   }
