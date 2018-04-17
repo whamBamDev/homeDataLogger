@@ -6,4 +6,4 @@ A data logger built using Arduino hardware and used to record temperatures and d
 
 The RTClib (https://github.com/adafruit/RTClib) needs to be added for the data logger shield.
 
-
+Before build then add freeMemory library.

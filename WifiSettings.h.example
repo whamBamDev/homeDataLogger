@@ -2,6 +2,12 @@
  * Credentials for Wifi. Copy this example file to WifiSetting.h and update the parameters 
  * for your network.
  */
+#define WIFI_SSID "AT+CWJAP=\"SSID_name\",\"SSID_passwod\""
 
-#define SSIDNAME "Arduino!"
-#define SSIDPWD "Arduino!"
+/*
+ * If you want a static IP then comment out the next line and uncomment the sebsequent line.
+ * Replace the xxx with the address you want.
+ */
+#define SET_IP F("");
+//#define SET_IP F("AT+CIPSTA=\"192.168.0.xxx\",\"192.168.0.1\",\"255.255.255.0\"");
+

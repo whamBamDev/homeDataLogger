@@ -1,7 +1,9 @@
 //outputs CSV data that can be opened by Excel, time is stored as serial number accurate to ~1second
 //WIFI webserver to dynamically download data
 
+#include "WifiSettings.h"
 #include <avr/pgmspace.h>
+#include <MemoryFree.h>
 
 //Needed for SD card
 //Uses hardware SPI on D10,D11,D12,D13
@@ -9,17 +11,23 @@
 #include <SPI.h>
 #include <SD.h>
 
-const int chipSelect = 10;
 File fhandle;
-//#define FILENAME "DATA_%02d_%04d.CSV"
-#define FILENAME "D%02d_%04d.js"
-//#define JSON_START F("[\r\n")
-//#define JSON_END F("\r\n]")
-//const char JSON_START[] PROGMEM = "[\r\n";
-//const char JSON_END[] PROGMEM = "\r\n]";
-const char JSON_START[] = "[\r\n";
-const char JSON_END[] = "\r\n]";
+//#define FILENAME "%04d%02d%02d.JS"
+const char FILENAME[] PROGMEM = "%04d%02d%02d.JS";
+const char XML_DATE[] PROGMEM = "%04d-%02d-%02d";
+const char XML_TIME[] PROGMEM = "%02d:%02d:%02d";
 
+const char HTTP_HEADER_GET[] PROGMEM = "GET ";
+const char URL_FILE_INDEX_1[] PROGMEM = "index.htm";
+const char URL_FILE_INDEX_2[] PROGMEM = "index.html";
+const char URL_FILE_LIST[] PROGMEM = "list.html";
+
+const char INDEX_LINE[] PROGMEM = "<a href=\"%s\">Download %s</a><br>\n";
+
+
+#define JSON_START F("[\r\n")
+#define JSON_END F("\r\n]")
+#define JSON_NULL F("null")
 
 #define LOGINTERVAL 60
 #define LIGHTPIN A0
@@ -32,7 +40,7 @@ const char JSON_END[] = "\r\n]";
 //Needed for RTC
 //Uses SCL and SDA aka A4 and A5
 #include <Wire.h>
-#include "RTClib.h"
+#include <RTClib.h>
 
 RTC_DS1307 rtc;
 
@@ -59,75 +67,68 @@ int DHTstatus=0;
 #define US_TIMEOUT_2_5M 14500  // Timeout for 2.5m
 #define US_TIMEOUT_4M   23200  // Timeout for 2m
 
-//for WIFI, including SSID name and password and most HTML pages
-#include "WifiSettings.h"
-
 #define WIFI Serial
-#define HTTPINDEX "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>WIFI DATALOGGER</h2><br>Choose a link:<br><a href=\"DATA.CSV\">Download DATA.CSV</a><br><a href=\"SPARSE.CSV\">Sparse Data file</a><br><a href=\"RECENT.CSV\">Most recent data</a><br>"
-#define HTTP404 "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br>"
-#define HTTPCSV "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nConnection: close\r\n\r\n"
-#define STATUSTITLE "<br>Status (zero is no error):"
+//#define SSIDNAME "PJIHOME"
+//#define SSIDPWD "tush14sritush14sri"
+//#define WIFI_SSID "AT+CWJAP=\"PJIHOME\",\"tush14sritush14sri\""
 
+#define AT_CMD_SEND F("AT+CIPSEND=")
+#define AT_CMD_CLOSE F("AT+CIPCLOSE=")
 
+#define HTTPINDEX_START F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Click <a href=\"list.html\">list</a> to see the files that are availble to download.<br><br>\r\n")
+#define HTTPLIST F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Choose a file:<br>\r\n")
+#define HTTP404 "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>"
+#define HTTPJSON "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+#define STATUSTITLE F("<br>Status (zero is no error):")
+#define HTMLEND F("</body></html>")
 
-#define DEBUG_CONSOLE true
-//#define DEBUG_CONSOLE false
-#include "debug.h"
-
-const char LOG_MSG_STARTUP[] PROGMEM = "Setup Starting %d";
 const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 
-Debug logger = Debug("dataLogger.log", DEBUG_CONSOLE);
-
 // sketch needs ~450 bytes local space to not crash
-#define PKTSIZE 257
-#define SBUFSIZE 30
+#define PKTSIZE 129
+//#define PKTSIZE 257
+//#define PKTSIZE 150
+#define SBUFSIZE 20
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
 char currentFilename[SBUFSIZE]="";    //filename
 int cxn=-1;                 //connection number
 char pktbuf[PKTSIZE]="";    //to consolidate data for sending
-const char ok[] PROGMEM = "OK\r\n";         //OK response is very common
-
-const char SEND_OK[] PROGMEM = "SEND OK";         //OK response is very common
+const char ok[]= "OK\r\n";         //OK response is very common
+const char SEND_OK[] = "SEND OK";         //OK response is very common
 
 const char SEND_DATA[] PROGMEM = "AT+CIPSEND=";
 
 const char COMMA[] = ",";
 
+
 void setup() {
   WIFI.begin(115200);   //start serial port for WIFI
-
-  logger.printfln(LOG_MSG_STARTUP,0);
 
   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
 
   wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
   DHTsetup();           //start temp/humidity sensor
-  logger.printfln(LOG_MSG_STARTUP,2);
+
   pinMode(LED2,OUTPUT);
   digitalWrite(LED2,HIGH);      //turn on LED to show card in use
-  if(!SD.begin(chipSelect)){    //SD card not responding
-    logger.printfln("Setup Starting - no sd");
+  if(!SD.begin(10)){            //SD card not responding
     errorflash(1);              //flash error code for card not found
   }
 
-  logger.printfln(LOG_MSG_STARTUP,3);
   if (!rtc.begin()) {           // rtc not responding
     errorflash(2);              //flash error code for RTC not found
   }
 
     // Use the compile date/time, change to use 
 //  if (! rtc.initialized()) {
-    logger.printfln(F("RTC check time"));
     DateTime now = rtc.now();
     DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
 //      rtc.adjust(compileTime);
 
-    logger.printfln(F("compile time = %i, now time = %i"), compileTime.secondstime(), now.secondstime());
     if( compileTime.secondstime() > now.secondstime()) {
+      //WIFI.println(F("--- 2"));
       // following line sets the RTC to the date & time this sketch was compiled
-      logger.printfln(F("RTC setting time to %d"),compileTime.secondstime());
       rtc.adjust(compileTime);
     }
 //  }
@@ -135,42 +136,38 @@ void setup() {
   if (!rtc.isrunning()) {       //rtc not running- use ds1307 example to load current time
     errorflash(3);              //flash error code for RTC not running
   }
-
-  logger.printfln(LOG_MSG_STARTUP,5);
-  fhandle = openDataFile();
-  if(!fhandle){                 //if file able to be opened
-  logger.printfln(LOG_MSG_STARTUP,7);
-    errorflash(4);              //flash error code for file not opened
+  
+  openDataFile();
+//  Serial.print(F("fileHandle size = ")); Serial.println(sizeof(fhandle)); 
+  if( ! fhandle) {
+    errorflash(4);              //flash error code for RTC not running
   }
-
-  fhandle.close();              //close file so data is saved
-
-  logger.printfln(LOG_MSG_STARTUP,1000);
+  fhandle.close(); //then close the file
+//Serial.print(F("freeMemory()=")); Serial.println(freeMemory()); 
+  //dirList(F("endSetup"));
 }
 
 void loop() {
 //  if(millis()>tmout+LOGINTERVAL*1000L){   //if it's been more than logging interval
   if(millis()>tmout+LOGINTERVAL*100L){   //if it's been more than logging interval
-    logger.printfln(F("Sampling "));
     getvalue();                           //fetch data to log
 //    tmout=tmout+LOGINTERVAL*1000L;        //add interval, so interval is precise
-    logger.printfln(F("Temp complete, distance check"));
     int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
-    logger.printfln(F("Distance = %d"), distanceA);
 
     //light=analogRead(LIGHTPIN);     //get light sensor data
     float temperatureA = readThermister(TEMP_A_PIN);
     float temperatureB = readThermister(TEMP_B_PIN);
     float temperatureC = readThermister(TEMP_C_PIN);
     float temperatureD = readThermister(TEMP_D_PIN);
-    logger.printf(LOG_MSG_TEMP_VALUE,1,(100*temperatureA));
-    logger.printf(LOG_MSG_TEMP_VALUE,2,temperatureB);
-    logger.printf(LOG_MSG_TEMP_VALUE,3,temperatureC);
-    logger.printfln(LOG_MSG_TEMP_VALUE,4,temperatureD);
+//    Serial.print(F("DistanceA=")); Serial.println(distanceA);
+//    Serial.print(F("tempA=")); Serial.println(temperatureA);
+//    Serial.print(F("tempB=")); Serial.println(temperatureB);
+//    Serial.print(F("tempC=")); Serial.println(temperatureC);
+//    Serial.print(F("tempD=")); Serial.println(temperatureD);
 
     logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, -1);          //log it
-    logger.printfln(F("Sampled"));
 
+//    Serial.print(F("freeMemory()=")); Serial.println(freeMemory()); 
     tmout=tmout+LOGINTERVAL*1000L;        //add interval, so interval is precise
   }
   checkwifi();  
@@ -192,84 +189,62 @@ void getvalue(){                  //put subroutine for getting data to log here
   DHTstatus=DHT11();              //DHTstatus=0 if error
   temp=DHTtemp;                   //DHT11() loads temp into DHTtemp      
   hum=DHThum;                     //DHT11() loads humidity into DHThum
-  logger.printfln(F("status = %d, temp = %d, humidty = %d"),DHTstatus,temp,hum);
 }
 
-void errorflash(int n){           //non-recoverable error, flash code on LED1
-  status=n;                       //set status for webpage
-  pinMode(LED1,OUTPUT);
-  while(1){                       //do until reset
-    for(int i=0;i<n;i++){         //flash n times
-      digitalWrite(LED1,HIGH);
-      delay(500);
-      digitalWrite(LED1,LOW);
-      delay(300);      
-      checkwifi();                //wifi services still available during fault
-    }
-    delay(1000);                  //pause and repeat
-  }  
-}
 
-// TODO: rename to sprintf.
-const char * createFilename( const char *format, ...){
-  va_list args;
-  va_start(args, format);
-  vsnprintf(fname, sizeof(fname), format, args);
-  va_end(args);
-  return fname;  
-}
-
-File openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
+void openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
   DateTime now = rtc.now();                   //capture time
 
-  const char *filename = createFilename( FILENAME, now.month(), now.year());
-  logger.printfln(F("opening data file %s"), filename);
-  if( strcmp(filename,currentFilename) == 0) {
+  sprintf_P(fname, FILENAME, now.year(), now.month(), now.day());
+  //Serial.print(F("o-- 3 "));
+  //Serial.println(fname);
+  if( strlen(currentFilename) == 0) {
+    strcpy(currentFilename,fname);
+  }
+  if( strcmp(fname,currentFilename) != 0) {
     File currenFile = SD.open(currentFilename, FILE_WRITE);
     currenFile.print(JSON_END);
     currenFile.close();
-    strcpy(currentFilename,filename);
+    strcpy(currentFilename,fname);
   }
 
-  fhandle = SD.open(filename, FILE_WRITE);
-  return fhandle;
+//    Serial.print(F("o-- 6:"));
+//    Serial.print(filename);
+//    Serial.println(F(":"));
+  fhandle = SD.open(fname, FILE_WRITE);
+//    Serial.print(F("o-- 7: "));
+//    Serial.println((fhandle));
 }
-
 
 void logtocard(float temperatureA, float temperatureB, float temperatureC, float temperatureD, int distanceA, int distanceB){
   unsigned long timestamp;
   DateTime now = rtc.now();                   //capture time
-  logger.printfln(F("timestamp = %d"),timestamp);
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
   
-  fhandle = openDataFile();
+  openDataFile();
 
   unsigned long s;
   s=fhandle.size();             //get file size
-   logger.printfln(F("size %d - %d - %d"),s,strlen(JSON_START),strlen(JSON_END));
   if(!s){                       //if file is empty, add column headers
-    logger.printfln(F("new file"));
     fhandle.print(JSON_START);
   } else {
     fhandle.println(COMMA);
   }
     
-  // Timestamo format ISO 8601: 2017-12-26T07:44:19Z
+  // Timestamp format ISO 8601: 2017-12-26T07:44:19Z
   fhandle.print(F(" {\r\n  \"sampleTime\": \"")); //write timestamp to card, integer part, converted to Excel time serial number with resolution of ~1 second
-  createFilename("%04d-%02d-%02d",now.year(),now.month(),now.day());
-  logger.printfln(F("sample date = %s"),fname);
-  fhandle.print(fname);
+  sprintf_P(pktbuf, XML_DATE, now.year(), now.month(), now.day());
+  fhandle.print(pktbuf);
   fhandle.print(F("T"));
-  createFilename("%02d:%02d:%02d",now.hour(),now.minute(),now.second());
-  logger.printfln(F("sample time = %s"),fname);
-  fhandle.print(fname);
+  sprintf_P(pktbuf, XML_TIME, now.hour(),now.minute(),now.second());
+  fhandle.print(pktbuf);
   fhandle.println(F("Z\","));
 
   fhandle.print(F("  \"outside\": { \"temperature\": "));
-  if(DHTstatus){fhandle.print(temp);}         //put data if valid otherwise blank (will be blank cell in Excel)
+  if(DHTstatus){fhandle.print(temp);}else{fhandle.print(JSON_NULL);}         //put data if valid otherwise blank (will be blank cell in Excel)
   fhandle.print(F(", \"humidity\": "));
-  if(DHTstatus){fhandle.print(hum);}          //put data if valid otherwise blank
+  if(DHTstatus){fhandle.print(hum);}else{fhandle.print(JSON_NULL);}          //put data if valid otherwise blank
   fhandle.print(F(", \"lightLevel\": "));
   fhandle.print(light);                       //put data (can't validate analog input)
   fhandle.println(F("},"));
@@ -345,6 +320,29 @@ int DHT11(){                    //returns 1 on ok, 0 on fail (eg checksum, data 
   return 1;                       //data valid
 }
 
+void errorflash(int n){           //non-recoverable error, flash code on LED1
+  WIFI.print(F("error flash:"));
+  WIFI.println(n);
+  status=n;                       //set status for webpage
+  pinMode(LED1,OUTPUT);
+  while(1){                       //do until reset
+    for(int i=0;i<n;i++){         //flash n times
+      digitalWrite(LED1,HIGH);
+      delay(500);
+      digitalWrite(LED1,LOW);
+      delay(300);      
+      checkwifi();                //wifi services still available during fault
+    }
+    delay(1000);                  //pause and repeat
+  }  
+}
+
+void usonicSetup(int trigPin, int echoPin){
+  pinMode(echoPin, INPUT);
+  pinMode(trigPin, OUTPUT);
+  digitalWrite(trigPin, LOW);
+}
+
 void dorequest(){
   long t;                              //timeout
   int p=0;                             //pointer to getreq position
@@ -370,22 +368,30 @@ void dorequest(){
       }      
     }
   }
-  if((getreq[0]!='G')||(getreq[1]!='E')||(getreq[2]!='T')||(getreq[3]!=' ')){crcount=0;}   //no 'GET ' at the start, so change flag to cancel
-  if(crcount==2){parsefile();}                                                             //complete request found, extract name of requested file
-  if(fname[0]==0){servepage();sendstatus();crcount=0;}                                     //serve index page, reset crcount on fileserve
-  if(strmatch("index.htm",fname)){servepage();sendstatus();crcount=0;}                     //serve index page, reset crcount on fileserve
-  if(strmatch("DATA.CSV",fname)){sendcsv();crcount=0;}                                     //serve entire data file
-  if(strmatch("SPARSE.CSV",fname)){sendcsvsparse(60);crcount=0;}                           //serve file with every nth sample
-  if(strmatch("RECENT.CSV",fname)){sendcsvrecent(2000);crcount=0;}                         //serve header, and approximately last n (will typically be slightly more)
+  fname[0]=0;                                              //blank
+  
+  if( strncmp_P(getreq, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) != 0){crcount=0;}   //no 'GET ' at the start, so change flag to cancel
+  if(crcount==2){parseFileName();}                                                       //complete request found, extract name of requested file
+  if(fname[0]==0 || strcmp_P(fname,URL_FILE_INDEX_1) == 0 || strcmp_P(fname,URL_FILE_INDEX_2) == 0){
+    servepage();
+    sendstatus();
+    crcount=0;                                      //serve index page, reset crcount on fileserve
+  } else if(strcmp_P(fname, URL_FILE_LIST) == 0){
+    listpage();
+    sendstatus();
+    crcount=0;                                      //serve index page, reset crcount on fileserve
+  } else {
+    crcount = sendcsv(fname);                                 //serve entire data file
+  }
   if(crcount){serve404();sendstatus();}                                                    //no valid file served => 404 error
-  WIFI.print(F("AT+CIPCLOSE="));                                                           //close
+  WIFI.print(AT_CMD_CLOSE);                                                           //close
   WIFI.print(cxn);  
-  WIFIcmd("",ok,2000);                                                                     //disconnect
+  WIFIcmd(F(""),ok,2000);                                                                     //disconnect
   cxn=-1;                                                                                  //clear for next connection
 }
 
 
-void parsefile(){
+void parseFileName(){
   fname[0]=0;                                              //blank
   int p=5;                                                 //start after 'GET /'
   int t=0;                                                 //use ? to separate fields, ' ' to end
@@ -398,33 +404,63 @@ void parsefile(){
 }
 
 void sendstatus(){                                   //to show logger status
-  WIFI.print(F("AT+CIPSEND="));                      //send data
+  WIFI.print(AT_CMD_SEND);                      //send data
   WIFI.print(cxn);                                   //to client
-  WIFI.print(",");              
-  WIFI.println(strlen(STATUSTITLE)+1);               //data has length, needs to be same as string below, plus 1 for status
+  WIFI.print(F(","));              
+  WIFI.println(strlen_PF(STATUSTITLE) + 1 + strlen_PF(HTMLEND));            //data has length, needs to be same as string below, plus 1 for status
   delay(50);
-  WIFI.print(F(STATUSTITLE));
+  WIFI.print(STATUSTITLE);
   WIFI.write((status%10)+'0');                       //exactly one digit
+  WIFI.print(HTMLEND);
   delay(250);
   WIFIpurge();
-  
 }
 
 void servepage(){                                     //for serving a page of data
-  WIFI.print(F("AT+CIPSEND="));                       //send data
+  WIFI.print(AT_CMD_SEND);                            //send data
   WIFI.print(cxn);                                    //to client
-  WIFI.print(",");              
-  WIFI.println(strlen(HTTPINDEX));                    //data has length, needs to be same as string below
+  WIFI.print(F(","));              
+  WIFI.println(strlen_PF(HTTPINDEX_START));           //data has length, needs to be same as string below
   delay(50);
-  WIFI.print(F(HTTPINDEX));
+  WIFI.print(HTTPINDEX_START);
   delay(250);
   WIFIpurge();
+}
+
+
+void listpage(){                                     //for serving a page of data
+  WIFI.print(AT_CMD_SEND);                            //send data
+  WIFI.print(cxn);                                    //to client
+  WIFI.print(F(","));              
+  WIFI.println(strlen_PF(HTTPLIST));                    //data has length, needs to be same as string below
+  delay(50);
+  WIFI.print(HTTPLIST);
+  delay(250);
+  WIFIpurge();
+
+  File root = SD.open("/",FILE_READ);
+  root.seek(0);
+  while (true) {
+     File entry =  root.openNextFile();
+     if (! entry) {
+       // no more files
+       break;
+     }
+     if (! entry.isDirectory()) {
+       // files have sizes, directories do not
+       //<a href=\"DATA.CSV\">Download DATA.CSV</a><br>
+       sprintf_P(pktbuf, INDEX_LINE, entry.name(), entry.name());
+       WIFIsenddata(pktbuf,cxn);
+     }
+     entry.close();
+   }
+   root.close();
 }
 
 void serve404(){                                //for serving a page of data
   WIFI.print(F("AT+CIPSEND="));                 //send data
   WIFI.print(cxn);                              //to client
-  WIFI.print(",");              
+  WIFI.print(F(","));              
   WIFI.println(strlen(HTTP404));                //data has length, needs to be same as string below
   delay(50);
   WIFI.print(F(HTTP404));
@@ -432,19 +468,29 @@ void serve404(){                                //for serving a page of data
   WIFIpurge();
 }
 
-void sendcsv(){                         //for providing a csv document to download
-  WIFI.print(F("AT+CIPSEND="));         //send data
-  WIFI.print(cxn);                      //to client
-  WIFI.print(",");              
-  WIFI.println(strlen(HTTPCSV));        //data has length, needs to be same as string below
+int sendcsv(char *filename){             //for providing a csv document to download
+  File dataFile = SD.open(filename);     // Open the file and see if it exists.
+  if (! dataFile) {
+    return 1;
+  }
+  
+  WIFI.print(F("AT+CIPSEND="));          //send data
+  WIFI.print(cxn);                       //to client
+  WIFI.print(F(","));              
+  WIFI.println(strlen(HTTPJSON));        //data has length, needs to be same as string below
   delay(50);
-  WIFI.print(F(HTTPCSV));               //send HTTP header for csv data type, file content to follow
+  WIFI.print(F(HTTPJSON));               //send HTTP header for csv data type, file content to follow
   delay(250);
-  WIFIpurge();
-  pktbuf[0]=0;                          //empty buffer
-  fhandle = SD.open(FILENAME);
-  while (fhandle.available()) {         //send it all
-    char c=fhandle.read();
+
+  bool appendJsonTail = true;
+  pktbuf[0]=0;                           //empty buffer
+
+  dataFile.seek(0);
+  while (dataFile.available()) {         //send it all
+    char c=dataFile.read();
+    if(appendJsonTail && c == ']') {
+      appendJsonTail = false;
+    }
     addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
     if(strlen(pktbuf)>PKTSIZE-2){       //if buffer full
       WIFIsenddata(pktbuf,cxn);         //send data
@@ -452,102 +498,44 @@ void sendcsv(){                         //for providing a csv document to downlo
       }    
     }
   if(pktbuf[0]){                        //send data if any left in buffer
-      WIFIsenddata(pktbuf,cxn);
+      WIFIsenddata(pktbuf,cxn);         //send data
   }
-  fhandle.close();                      //close file
-}
-
-void sendcsvsparse(int n){               //only send 1/n samples
-  if(n==0){n=1;}                         //to avoid divide by zero error
-  WIFI.print(F("AT+CIPSEND="));          //send data
-  WIFI.print(cxn);                       //to client
-  WIFI.print(",");              
-  WIFI.println(strlen(HTTPCSV));         //header  has length, needs to be same as string below
-  delay(50);
-  WIFI.print(F(HTTPCSV));                //send csv header
-  delay(250);
-  WIFIpurge();
-  pktbuf[0]=0;    //empty buffer
-  unsigned int lfcount=0;                //only output when lfcount%n==0
-  fhandle = SD.open(FILENAME);
-  while (fhandle.available()) {          //scan it all
-    char c=fhandle.read();
-    if((lfcount%n)==0){                  //only every nth line (but first, with headers will get sent)
-      addtobuffer(pktbuf,PKTSIZE,c);
-      if(strlen(pktbuf)>PKTSIZE-2){
-        WIFIsenddata(pktbuf,cxn);        //send data      
-      pktbuf[0]=0;                       //empty buffer      
-      }
-    }
-    if(c==10){lfcount++;}
-  }
-  if(pktbuf[0]){
-      WIFIsenddata(pktbuf,cxn);
-  }
-  fhandle.close();
-}
-
-void sendcsvrecent(int n){                    //only send header line and last n bytes ((approximately)
-  long p;
-  WIFI.print(F("AT+CIPSEND="));               //send data
-  WIFI.print(cxn);                            //to client
-  WIFI.print(",");              
-  WIFI.println(strlen(HTTPCSV));              //data has length, needs to be same as string below
-  delay(50);
-  WIFI.print(F(HTTPCSV));                     //send csv header
-  delay(250);
-  WIFIpurge();
-  pktbuf[0]=0;                                //empty buffer
-  unsigned int lfcount=0;                     //to make sure first line is sent
-  fhandle = SD.open(FILENAME);
-  while (fhandle.available()) {               //scan it all, send all except what gets skipped below
-    char c=fhandle.read();
-    addtobuffer(pktbuf,PKTSIZE,c);            //add to buffer
-    if(strlen(pktbuf)>PKTSIZE-2){             //if buffer nearly full
-      WIFIsenddata(pktbuf,cxn);               //send data      
-      pktbuf[0]=0;                            //empty buffer
-    }
-  if((c==10)&&(lfcount==0)){                  //after first lf
-    lfcount=1;                                //tag that the next one isn't first
-    p=fhandle.position();                     //find current file position
-    if((fhandle.size()-n)>p){
-      fhandle.seek(fhandle.size()-n);
-      }                                       //if we're not already near the end, seek there
-    fhandle.find("\n");                       //need to find next lf to cleanly start line    
-    }
-  }
-  if(pktbuf[0]){      //if buffer not empty, send it
+  dataFile.close();                      //close file
+  if(appendJsonTail) {
+    strcpy_PF(pktbuf, JSON_END);
     WIFIsenddata(pktbuf,cxn);
   }
-  fhandle.close();
+
+  return 0;
 }
 
 
 void wifiinit(){
-#if DEBUG_CONSOLE == false
-  WIFIcmd("AT+RST","ready\r\n",5000);                                               //reset
-  WIFIcmd("AT+CWQAP",ok,5000);                                                      //exit any AP's
-  WIFIcmd("AT+CWJAP=\""  SSIDNAME  "\",\"" SSIDPWD  "\"","WIFI GOT IP\r\n",10000);  //join AP
-  WIFIcmd("ATE0",ok,1000);                                                          //turn echo off
-  WIFIcmd("AT+CWMODE=1",ok,2000);                                                   //station mode only
-  WIFIcmd("AT+CIPMUX=1",ok,2000);                                                   //MUX on (needed for server)
-  WIFIcmd("AT+CIPSERVER=1,80",ok,2000);                                             //server on
-  WIFIcmd("AT+CIPSTO=5",ok,2000);                                                   //disconnect after x time if no data
-#endif    
+  WIFIcmd(F("AT+RST"),"ready\r\n",5000);                                               //reset
+  WIFIcmd(F("AT+CWQAP"),ok,5000);                                                      //exit any AP's
+
+  WIFIcmd(WIFI_SSID,"WIFI GOT IP\r\n",10000);  //join AP
+  //WIFIcmd("AT+CWJAP=\""  SSIDNAME  "\",\"" SSIDPWD  "\"","WIFI GOT IP\r\n",10000);  //join AP
+  WIFIcmd(F("ATE0"),ok,1000);                                                          //turn echo off
+  if( strlen_PF(SET_IP) > 0) {
+    WIFIcmd(SET_IP,ok,5000);
+  }
+  WIFIcmd(F("AT+CWMODE=1"),ok,2000);                                                   //station mode only
+  WIFIcmd(F("AT+CIPMUX=1"),ok,2000);                                                   //MUX on (needed for server)
+  WIFIcmd(F("AT+CIPSERVER=1,80"),ok,2000);                                             //server on
+  WIFIcmd(F("AT+CIPSTO=10"),ok,2000);                                                   //disconnect after x time if no data
 }
 
 void checkwifi(){
-#if DEBUG_CONSOLE == false
   while(WIFI.available()){                    //check if any data from WIFI
     int d;
     d=WIFI.read();
     if((d>47)&&(d<58)&&(cxn<0)){cxn=d-48;}    //connection number, could come from IPD or CONNECT
     if(d==':'){digitalWrite(LED2,HIGH);dorequest();digitalWrite(LED2,LOW);}                  //: means end of IPD data, content follows. LED on while busy
   }
-#endif    
 }
-  
-int WIFIcmd(char* c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+
+int WIFIcmd(const __FlashStringHelper *c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
   long t;
   WIFI.println(c);
   t=millis();
@@ -559,45 +547,23 @@ int WIFIcmd(char* c,char* r,long tmout){   //command c (nocrlf needed), returns 
   return 0;       //response not found
 }
 
-void WIFIsenddata(char* d,int client){    //send data to client
-//
-  WIFI.print(F("AT+CIPSEND="));           //send data
-  WIFI.print(client);                     //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen(d));                //data has length
-  //delay(50);
-  WIFI.find(">");
-  WIFI.print(d);                          //data
-  delay(350);
-  WIFI.find("SEND OK");
-  WIFIpurge();                            //clear incoming buffer
-}
-
 void WIFIpurge(){                         //empty serial buffer
   while(WIFI.available()){WIFI.read();}
 }
 
-int strmatch(char str1[], char str2[], int n) {   //test for match in first n characters
-  int k = -1;                                     //default return success
-  for (int i = 0; i < n; i++) {
-    if (str1[i] != str2[i]) {
-      k = 0;                                      //non match found
-    }
-  }
-  return k;
+void WIFIsenddata(char* d, int client){   //send data to client
+  WIFI.print(F("AT+CIPSEND="));           //send data
+  WIFI.print(client);                     //to client
+  WIFI.print(F(","));              
+  WIFI.println(strlen(d));                //data has length
+  delay(50);
+  WIFI.find(">");
+  WIFI.print(d);                          //data
+  delay(100);
+  WIFI.find("SEND OK");
+  WIFIpurge();                            //clear incoming buffer
 }
 
-int strmatch(char str1[], char str2[]) {    //test for absolute match
-  int n =strlen(str2);                      //as above, n is length of second string
-  if(n!=strlen(str1)){return 0;}            // not the same length, can't be the same
-  int k = -1;                               //default return success   
-  for (int i = 0; i < n; i++) {
-    if (str1[i] != str2[i]) {
-      k = 0;                                //non match found
-    }
-  }
-  return k;
-}
 
 int addtobuffer(char buf[], int bufsize, char str[]){      //add str to end of buf, limited by bufsize
   int p=0;
@@ -645,12 +611,6 @@ int addtobuffer(char buf[], int bufsize, long n){      //add n as string to end 
   return p;                                             //number of characters added  
 }
 
-void usonicSetup(int trigPin, int echoPin){
-  pinMode(echoPin, INPUT);
-  pinMode(trigPin, OUTPUT);
-  digitalWrite(trigPin, LOW);
-}
-
 long usonicRead(int trigPin, int echoPin, long utimeout){ //utimeout is maximum time to wait for return in us
   long b;
 
@@ -674,4 +634,34 @@ long usonicRead(int trigPin, int echoPin, long utimeout){ //utimeout is maximum 
   return b/58;
 }
 
+void displayFreeMemory(const __FlashStringHelper *msg) {
+  Serial.print(F("freeMemory("));
+  Serial.print(msg);
+  Serial.print(F(")="));
+  Serial.println(freeMemory()); 
+}
+
+void dirList(const __FlashStringHelper *msg) {
+  Serial.print(F("------"));
+  Serial.println(msg);
+  displayFreeMemory(msg);
+
+  File root = SD.open("/",FILE_READ);
+  Serial.print(F("Root: "));
+  Serial.println((root));
+  root.seek(0);
+  while (true) {
+     File entry =  root.openNextFile();
+     Serial.print(F("Entry: "));
+     Serial.println((entry));
+     if (! entry) {
+       // no more files
+       break;
+     }
+     Serial.print(F("-> "));
+     Serial.println(entry.name());
+     entry.close();
+  }
+  root.close();
+}
 
