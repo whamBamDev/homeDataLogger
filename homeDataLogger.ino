@@ -11,8 +11,6 @@
 #include <SPI.h>
 #include <SD.h>
 
-File fhandle;
-//#define FILENAME "%04d%02d%02d.JS"
 const char FILENAME[] PROGMEM = "%04d%02d%02d.JS";
 const char XML_DATE[] PROGMEM = "%04d-%02d-%02d";
 const char XML_TIME[] PROGMEM = "%02d:%02d:%02d";
@@ -68,26 +66,23 @@ int DHTstatus=0;
 #define US_TIMEOUT_4M   23200  // Timeout for 2m
 
 #define WIFI Serial
-//#define SSIDNAME "PJIHOME"
-//#define SSIDPWD "tush14sritush14sri"
-//#define WIFI_SSID "AT+CWJAP=\"PJIHOME\",\"tush14sritush14sri\""
-
 #define AT_CMD_SEND F("AT+CIPSEND=")
 #define AT_CMD_CLOSE F("AT+CIPCLOSE=")
 
 #define HTTPINDEX_START F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Click <a href=\"list.html\">list</a> to see the files that are availble to download.<br><br>\r\n")
 #define HTTPLIST F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Choose a file:<br>\r\n")
-#define HTTP404 "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>"
-#define HTTPJSON "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
-#define STATUSTITLE F("<br>Status (zero is no error):")
+#define HTTP404 F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>")
+#define HTTPJSON F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+#define STATUSTITLE F("<br>Status (zero is no error): ")
+const char STATUS_TEXT[] PROGMEM = "<br>Status (zero is no error): %d<br>Current time: %04d-%02d-%02d %02d:%02d:%02d";
 #define HTMLEND F("</body></html>")
 
 const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 
 // sketch needs ~450 bytes local space to not crash
-#define PKTSIZE 129
+//#define PKTSIZE 129
 //#define PKTSIZE 257
-//#define PKTSIZE 150
+#define PKTSIZE 161
 #define SBUFSIZE 20
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
@@ -120,14 +115,19 @@ void setup() {
     errorflash(2);              //flash error code for RTC not found
   }
 
-    // Use the compile date/time, change to use 
-//  if (! rtc.initialized()) {
+    //WIFI.print(F("Compile time = "));
+    //WIFI.print(F(__DATE__));
+    //WIFI.print(F(" "));
+    //WIFI.println(F(__TIME__));
+    // Use the compile date/time, change to use NTP server one day
+//  if (! rtc.initialized ()) {
     DateTime now = rtc.now();
     DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
 //      rtc.adjust(compileTime);
 
-    if( compileTime.secondstime() > now.secondstime()) {
-      //WIFI.println(F("--- 2"));
+    // The 70*60 is a bit of a half arsed attempt to not set the date during summer DST
+    if( compileTime.secondstime() > (now.secondstime() + (70*60))) {
+      WIFI.println(F("--- 2"));
       // following line sets the RTC to the date & time this sketch was compiled
       rtc.adjust(compileTime);
     }
@@ -137,8 +137,7 @@ void setup() {
     errorflash(3);              //flash error code for RTC not running
   }
   
-  openDataFile();
-//  Serial.print(F("fileHandle size = ")); Serial.println(sizeof(fhandle)); 
+  File fhandle = openDataFile();
   if( ! fhandle) {
     errorflash(4);              //flash error code for RTC not running
   }
@@ -192,7 +191,7 @@ void getvalue(){                  //put subroutine for getting data to log here
 }
 
 
-void openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
+File openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
   DateTime now = rtc.now();                   //capture time
 
   sprintf_P(fname, FILENAME, now.year(), now.month(), now.day());
@@ -211,7 +210,7 @@ void openDataFile(){      //put the column headers you would like here, if you d
 //    Serial.print(F("o-- 6:"));
 //    Serial.print(filename);
 //    Serial.println(F(":"));
-  fhandle = SD.open(fname, FILE_WRITE);
+  return SD.open(fname, FILE_WRITE);
 //    Serial.print(F("o-- 7: "));
 //    Serial.println((fhandle));
 }
@@ -222,7 +221,10 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
   
-  openDataFile();
+  File fhandle = openDataFile();
+  if(!fhandle){                     // Cannot open the file, raise an error.
+    errorflash(5);
+  }
 
   unsigned long s;
   s=fhandle.size();             //get file size
@@ -232,14 +234,14 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
     fhandle.println(COMMA);
   }
     
-  // Timestamp format ISO 8601: 2017-12-26T07:44:19Z
+  // Timestamp format ISO 8601: 2017-12-26T07:44:19+10
   fhandle.print(F(" {\r\n  \"sampleTime\": \"")); //write timestamp to card, integer part, converted to Excel time serial number with resolution of ~1 second
   sprintf_P(pktbuf, XML_DATE, now.year(), now.month(), now.day());
   fhandle.print(pktbuf);
   fhandle.print(F("T"));
   sprintf_P(pktbuf, XML_TIME, now.hour(),now.minute(),now.second());
   fhandle.print(pktbuf);
-  fhandle.println(F("Z\","));
+  fhandle.println(F("+10\","));
 
   fhandle.print(F("  \"outside\": { \"temperature\": "));
   if(DHTstatus){fhandle.print(temp);}else{fhandle.print(JSON_NULL);}         //put data if valid otherwise blank (will be blank cell in Excel)
@@ -267,7 +269,7 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
 
   if(!fhandle.print(F(" }"))){                     //if we can't write data, there's a problem with card (probably full)
     fhandle.close();                          //close file to save the data we have
-    errorflash(5);                            //error code
+    errorflash(6);                            //error code
   }
   fhandle.close();                            //close file so data is saved
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
@@ -403,6 +405,23 @@ void parseFileName(){
   }
 }
 
+
+void sendstatus(){                                   //to show logger status
+  WIFI.print(AT_CMD_SEND);                      //send data
+  WIFI.print(cxn);                                   //to client
+  WIFI.print(F(","));        
+
+  DateTime now = rtc.now();
+  sprintf_P(pktbuf, STATUS_TEXT, status, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second());
+  WIFI.println(strlen(pktbuf) + strlen_PF(HTMLEND));            //data has length, needs to be same as string below, plus 1 for status
+  delay(50);
+  WIFI.print(pktbuf);
+  WIFI.print(HTMLEND);
+  delay(250);
+  WIFIpurge();
+}
+
+/*
 void sendstatus(){                                   //to show logger status
   WIFI.print(AT_CMD_SEND);                      //send data
   WIFI.print(cxn);                                   //to client
@@ -415,6 +434,7 @@ void sendstatus(){                                   //to show logger status
   delay(250);
   WIFIpurge();
 }
+*/
 
 void servepage(){                                     //for serving a page of data
   WIFI.print(AT_CMD_SEND);                            //send data
@@ -461,9 +481,9 @@ void serve404(){                                //for serving a page of data
   WIFI.print(F("AT+CIPSEND="));                 //send data
   WIFI.print(cxn);                              //to client
   WIFI.print(F(","));              
-  WIFI.println(strlen(HTTP404));                //data has length, needs to be same as string below
+  WIFI.println(strlen_PF(HTTP404));                //data has length, needs to be same as string below
   delay(50);
-  WIFI.print(F(HTTP404));
+  WIFI.print(HTTP404);
   delay(250);
   WIFIpurge();
 }
@@ -477,9 +497,9 @@ int sendcsv(char *filename){             //for providing a csv document to downl
   WIFI.print(F("AT+CIPSEND="));          //send data
   WIFI.print(cxn);                       //to client
   WIFI.print(F(","));              
-  WIFI.println(strlen(HTTPJSON));        //data has length, needs to be same as string below
+  WIFI.println(strlen_PF(HTTPJSON));        //data has length, needs to be same as string below
   delay(50);
-  WIFI.print(F(HTTPJSON));               //send HTTP header for csv data type, file content to follow
+  WIFI.print(HTTPJSON);               //send HTTP header for csv data type, file content to follow
   delay(250);
 
   bool appendJsonTail = true;
@@ -515,7 +535,6 @@ void wifiinit(){
   WIFIcmd(F("AT+CWQAP"),ok,5000);                                                      //exit any AP's
 
   WIFIcmd(WIFI_SSID,"WIFI GOT IP\r\n",10000);  //join AP
-  //WIFIcmd("AT+CWJAP=\""  SSIDNAME  "\",\"" SSIDPWD  "\"","WIFI GOT IP\r\n",10000);  //join AP
   WIFIcmd(F("ATE0"),ok,1000);                                                          //turn echo off
   if( strlen_PF(SET_IP) > 0) {
     WIFIcmd(SET_IP,ok,5000);
