@@ -11,8 +11,25 @@
 #include <SPI.h>
 #include <SD.h>
 
-File fhandle;
-//#define FILENAME "%04d%02d%02d.JS"
+const char NTP_CONNECT_CMD[] PROGMEM = "AT+CIPSTART=0,\"UDP\",\"%s\",123";
+const char TIME_FORMAT[] PROGMEM = "%04d-%02d-%02d %02d:%02d:%02d";
+
+const char UTP0_HOST[] PROGMEM = "0.au.pool.ntp.org";
+const char UTP0_IP[] PROGMEM = "203.100.61.10";
+const char UTP1_HOST[] PROGMEM = "1.au.pool.ntp.org";
+const char UTP1_IP[] PROGMEM = "54.252.129.186";
+const char UTP2_HOST[] PROGMEM = "2.au.pool.ntp.org";
+const char UTP2_IP[] PROGMEM = "144.48.166.166";
+const char UTP3_HOST[] PROGMEM = "3.au.pool.ntp.org";
+const char UTP3_IP[] PROGMEM = "203.19.252.4";
+
+const char * const NTP_SERVERS[][2] PROGMEM = {
+  {UTP1_HOST, UTP1_IP},
+  {UTP0_HOST, UTP0_IP},
+  {UTP2_HOST, UTP2_IP},
+  {UTP3_HOST, UTP3_IP}
+};
+
 const char FILENAME[] PROGMEM = "%04d%02d%02d.JS";
 const char XML_DATE[] PROGMEM = "%04d-%02d-%02d";
 const char XML_TIME[] PROGMEM = "%02d:%02d:%02d";
@@ -24,12 +41,14 @@ const char URL_FILE_LIST[] PROGMEM = "list.html";
 
 const char INDEX_LINE[] PROGMEM = "<a href=\"%s\">Download %s</a><br>\n";
 
+#define TEN_HOURS_IN_SECONDS (10 * 60 * 60)
 
 #define JSON_START F("[\r\n")
 #define JSON_END F("\r\n]")
 #define JSON_NULL F("null")
 
-#define LOGINTERVAL 60
+// Every 10 minutes.
+#define LOGINTERVAL 10 * 60
 #define LIGHTPIN A0
 
 #define TEMP_A_PIN A0
@@ -47,9 +66,12 @@ RTC_DS1307 rtc;
 //LED pins- LED1 is diagnostic, LED2 is card in use (flickers during write)
 #define LED1 4
 #define LED2 3
-long tmout;   //keeps track of logging interval
+long sampleTime;   //keeps track of logging interval
 int temp,hum,light;   //variables to log
 int status=0;     //to display status info on webpage
+
+int ntpStatus=0;     //to display status info of NTP calls on webpage
+DateTime ntpLastLookupTime = NULL;
 
 //for DHT11 interface
 //#define DHT11PIN 8
@@ -68,18 +90,17 @@ int DHTstatus=0;
 #define US_TIMEOUT_4M   23200  // Timeout for 2m
 
 #define WIFI Serial
-//#define SSIDNAME "PJIHOME"
-//#define SSIDPWD "tush14sritush14sri"
-//#define WIFI_SSID "AT+CWJAP=\"PJIHOME\",\"tush14sritush14sri\""
-
 #define AT_CMD_SEND F("AT+CIPSEND=")
 #define AT_CMD_CLOSE F("AT+CIPCLOSE=")
 
 #define HTTPINDEX_START F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Click <a href=\"list.html\">list</a> to see the files that are availble to download.<br><br>\r\n")
 #define HTTPLIST F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Choose a file:<br>\r\n")
-#define HTTP404 "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>"
-#define HTTPJSON "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
-#define STATUSTITLE F("<br>Status (zero is no error):")
+#define HTTP404 F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>")
+#define HTTPJSON F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+#define STATUSTITLE F("<br>Status (zero is no error): ")
+// Too big for pktbuf buffer
+//const char STATUS_TEXT[] PROGMEM = "<br>Status (zero is no error): %d<br>Current time: %04d-%02d-%02d %02d:%02d:%02d<br>NTP Status (zero is no error): %d - last check time: %04d-%02d-%02d %02d:%02d:%02d";
+const char STATUS_TEXT[] PROGMEM = "<br>Status (zero is no error): %d<br>Current time: %04d-%02d-%02d %02d:%02d:%02d<br>";
 #define HTMLEND F("</body></html>")
 
 const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
@@ -87,7 +108,7 @@ const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 // sketch needs ~450 bytes local space to not crash
 #define PKTSIZE 129
 //#define PKTSIZE 257
-//#define PKTSIZE 150
+//#define PKTSIZE 161
 #define SBUFSIZE 20
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
@@ -106,9 +127,12 @@ void setup() {
   WIFI.begin(115200);   //start serial port for WIFI
 
   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
+  usonicSetup(USONIC_2_TRIG, USONIC_2_ECHO); //set up ultrasonic sensor
 
   wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
   DHTsetup();           //start temp/humidity sensor
+
+  //getNtpTime();
 
   pinMode(LED2,OUTPUT);
   digitalWrite(LED2,HIGH);      //turn on LED to show card in use
@@ -120,55 +144,57 @@ void setup() {
     errorflash(2);              //flash error code for RTC not found
   }
 
-    // Use the compile date/time, change to use 
-//  if (! rtc.initialized()) {
-    DateTime now = rtc.now();
-    DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
-//      rtc.adjust(compileTime);
-
-    if( compileTime.secondstime() > now.secondstime()) {
-      //WIFI.println(F("--- 2"));
-      // following line sets the RTC to the date & time this sketch was compiled
-      rtc.adjust(compileTime);
-    }
-//  }
+  //WIFI.print(F("Compile time = "));
+  //WIFI.print(F(__DATE__));
+  //WIFI.print(F(" "));
+  //WIFI.println(F(__TIME__));
+  // Use the compile date/time, change to use NTP server one day
+  DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
+  DateTime now = rtc.now();
+  // The 90*60 is a bit of a half arsed attempt to not set the date during summer DST
+  if( compileTime.secondstime() > (now.secondstime() + (90*60))) {
+    WIFI.println(F("--- 2"));
+    // following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(compileTime);
+  }
 
   if (!rtc.isrunning()) {       //rtc not running- use ds1307 example to load current time
     errorflash(3);              //flash error code for RTC not running
   }
   
-  openDataFile();
-//  Serial.print(F("fileHandle size = ")); Serial.println(sizeof(fhandle)); 
+  File fhandle = openDataFile();
   if( ! fhandle) {
     errorflash(4);              //flash error code for RTC not running
   }
   fhandle.close(); //then close the file
-//Serial.print(F("freeMemory()=")); Serial.println(freeMemory()); 
-  //dirList(F("endSetup"));
+
+  sampleTime = millis() + 10000;   //Wait for a second before the first sample.
 }
 
 void loop() {
-//  if(millis()>tmout+LOGINTERVAL*1000L){   //if it's been more than logging interval
-  if(millis()>tmout+LOGINTERVAL*100L){   //if it's been more than logging interval
+  if(millis()>sampleTime){   //if it's been more than logging interval
     getvalue();                           //fetch data to log
-//    tmout=tmout+LOGINTERVAL*1000L;        //add interval, so interval is precise
     int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
+    int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
 
     //light=analogRead(LIGHTPIN);     //get light sensor data
     float temperatureA = readThermister(TEMP_A_PIN);
     float temperatureB = readThermister(TEMP_B_PIN);
     float temperatureC = readThermister(TEMP_C_PIN);
     float temperatureD = readThermister(TEMP_D_PIN);
-//    Serial.print(F("DistanceA=")); Serial.println(distanceA);
-//    Serial.print(F("tempA=")); Serial.println(temperatureA);
-//    Serial.print(F("tempB=")); Serial.println(temperatureB);
-//    Serial.print(F("tempC=")); Serial.println(temperatureC);
-//    Serial.print(F("tempD=")); Serial.println(temperatureD);
+    //Serial.print(F("DistanceA=")); Serial.println(distanceA);
+    //Serial.print(F("DistanceB=")); Serial.println(distanceB);
+    //Serial.print(F("tempA=")); Serial.println(temperatureA);
+    //Serial.print(F("tempB=")); Serial.println(temperatureB);
+    //Serial.print(F("tempC=")); Serial.println(temperatureC);
+    //Serial.print(F("tempD=")); Serial.println(temperatureD);
+    //Serial.print(F("DHTtemp=")); Serial.println(DHTtemp);
+    //Serial.print(F("DHThum=")); Serial.println(DHThum);
 
-    logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, -1);          //log it
+    logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, distanceB);          //log it
 
-//    Serial.print(F("freeMemory()=")); Serial.println(freeMemory()); 
-    tmout=tmout+LOGINTERVAL*1000L;        //add interval, so interval is precise
+//    sampleTime+=(LOGINTERVAL*10L);        //add interval, so interval is precise
+    sampleTime+=(LOGINTERVAL*1000L);        //add interval, so interval is precise
   }
   checkwifi();  
 }
@@ -192,12 +218,9 @@ void getvalue(){                  //put subroutine for getting data to log here
 }
 
 
-void openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
+File openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
   DateTime now = rtc.now();                   //capture time
-
   sprintf_P(fname, FILENAME, now.year(), now.month(), now.day());
-  //Serial.print(F("o-- 3 "));
-  //Serial.println(fname);
   if( strlen(currentFilename) == 0) {
     strcpy(currentFilename,fname);
   }
@@ -208,12 +231,7 @@ void openDataFile(){      //put the column headers you would like here, if you d
     strcpy(currentFilename,fname);
   }
 
-//    Serial.print(F("o-- 6:"));
-//    Serial.print(filename);
-//    Serial.println(F(":"));
-  fhandle = SD.open(fname, FILE_WRITE);
-//    Serial.print(F("o-- 7: "));
-//    Serial.println((fhandle));
+  return SD.open(fname, FILE_WRITE);
 }
 
 void logtocard(float temperatureA, float temperatureB, float temperatureC, float temperatureD, int distanceA, int distanceB){
@@ -222,7 +240,10 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
   
-  openDataFile();
+  File fhandle = openDataFile();
+  if(!fhandle){                     // Cannot open the file, raise an error.
+    errorflash(5);
+  }
 
   unsigned long s;
   s=fhandle.size();             //get file size
@@ -232,14 +253,14 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
     fhandle.println(COMMA);
   }
     
-  // Timestamp format ISO 8601: 2017-12-26T07:44:19Z
+  // Timestamp format ISO 8601: 2017-12-26T07:44:19+10
   fhandle.print(F(" {\r\n  \"sampleTime\": \"")); //write timestamp to card, integer part, converted to Excel time serial number with resolution of ~1 second
   sprintf_P(pktbuf, XML_DATE, now.year(), now.month(), now.day());
   fhandle.print(pktbuf);
   fhandle.print(F("T"));
   sprintf_P(pktbuf, XML_TIME, now.hour(),now.minute(),now.second());
   fhandle.print(pktbuf);
-  fhandle.println(F("Z\","));
+  fhandle.println(F("+10\","));
 
   fhandle.print(F("  \"outside\": { \"temperature\": "));
   if(DHTstatus){fhandle.print(temp);}else{fhandle.print(JSON_NULL);}         //put data if valid otherwise blank (will be blank cell in Excel)
@@ -267,7 +288,7 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
 
   if(!fhandle.print(F(" }"))){                     //if we can't write data, there's a problem with card (probably full)
     fhandle.close();                          //close file to save the data we have
-    errorflash(5);                            //error code
+    errorflash(6);                            //error code
   }
   fhandle.close();                            //close file so data is saved
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
@@ -403,14 +424,27 @@ void parseFileName(){
   }
 }
 
+
 void sendstatus(){                                   //to show logger status
-  WIFI.print(AT_CMD_SEND);                      //send data
+  WIFI.print(AT_CMD_SEND);                           //send data
   WIFI.print(cxn);                                   //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen_PF(STATUSTITLE) + 1 + strlen_PF(HTMLEND));            //data has length, needs to be same as string below, plus 1 for status
+  WIFI.print(F(","));        
+
+  int ntpYear   = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.year() : 0;
+  int ntpMonth  = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.month() : 0;
+  int ntpDay    = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.day() : 0;
+  int ntpHour   = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.hour() : 0;
+  int ntpMinute = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.minute() : 0;
+  int ntpSecond = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.second() : 0;
+  
+  DateTime now = rtc.now();
+  sprintf_P(pktbuf, STATUS_TEXT, status, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second());
+// Full status was too big for pktbuf buffer.
+//  sprintf_P(pktbuf, STATUS_TEXT, status, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second(),
+//     ntpStatus, ntpYear, ntpMonth, ntpDay, ntpHour, ntpMinute, ntpSecond);
+  WIFI.println(strlen(pktbuf) + strlen_PF(HTMLEND));            //data has length, needs to be same as string below, plus 1 for status
   delay(50);
-  WIFI.print(STATUSTITLE);
-  WIFI.write((status%10)+'0');                       //exactly one digit
+  WIFI.print(pktbuf);
   WIFI.print(HTMLEND);
   delay(250);
   WIFIpurge();
@@ -461,9 +495,9 @@ void serve404(){                                //for serving a page of data
   WIFI.print(F("AT+CIPSEND="));                 //send data
   WIFI.print(cxn);                              //to client
   WIFI.print(F(","));              
-  WIFI.println(strlen(HTTP404));                //data has length, needs to be same as string below
+  WIFI.println(strlen_PF(HTTP404));                //data has length, needs to be same as string below
   delay(50);
-  WIFI.print(F(HTTP404));
+  WIFI.print(HTTP404);
   delay(250);
   WIFIpurge();
 }
@@ -477,9 +511,9 @@ int sendcsv(char *filename){             //for providing a csv document to downl
   WIFI.print(F("AT+CIPSEND="));          //send data
   WIFI.print(cxn);                       //to client
   WIFI.print(F(","));              
-  WIFI.println(strlen(HTTPJSON));        //data has length, needs to be same as string below
+  WIFI.println(strlen_PF(HTTPJSON));        //data has length, needs to be same as string below
   delay(50);
-  WIFI.print(F(HTTPJSON));               //send HTTP header for csv data type, file content to follow
+  WIFI.print(HTTPJSON);               //send HTTP header for csv data type, file content to follow
   delay(250);
 
   bool appendJsonTail = true;
@@ -515,12 +549,11 @@ void wifiinit(){
   WIFIcmd(F("AT+CWQAP"),ok,5000);                                                      //exit any AP's
 
   WIFIcmd(WIFI_SSID,"WIFI GOT IP\r\n",10000);  //join AP
-  //WIFIcmd("AT+CWJAP=\""  SSIDNAME  "\",\"" SSIDPWD  "\"","WIFI GOT IP\r\n",10000);  //join AP
   WIFIcmd(F("ATE0"),ok,1000);                                                          //turn echo off
   if( strlen_PF(SET_IP) > 0) {
     WIFIcmd(SET_IP,ok,5000);
   }
-  WIFIcmd(F("AT+CWMODE=1"),ok,2000);                                                   //station mode only
+  WIFIcmd(F("AT+CWMODE=3"),ok,2000);                                                   //station mode only
   WIFIcmd(F("AT+CIPMUX=1"),ok,2000);                                                   //MUX on (needed for server)
   WIFIcmd(F("AT+CIPSERVER=1,80"),ok,2000);                                             //server on
   WIFIcmd(F("AT+CIPSTO=10"),ok,2000);                                                   //disconnect after x time if no data
@@ -536,6 +569,18 @@ void checkwifi(){
 }
 
 int WIFIcmd(const __FlashStringHelper *c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  long t;
+  WIFI.println(c);
+  t=millis();
+  while(millis()-t<tmout){          //until timeout
+    while(WIFI.available()){
+      if(WIFI.find(r)){return 1;}   //response good
+    }    
+  }
+  return 0;       //response not found
+}
+
+int WIFIcmd(const char* c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
   long t;
   WIFI.println(c);
   t=millis();
@@ -663,5 +708,194 @@ void dirList(const __FlashStringHelper *msg) {
      entry.close();
   }
   root.close();
+}
+
+
+
+int WIFIcmd2(const __FlashStringHelper *c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  long t;
+  WIFI.println(c);
+//  Serial.println("");
+  const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
+  byte packetBuffer[ NTP_PACKET_SIZE+1]; 
+  memset(packetBuffer, 0, NTP_PACKET_SIZE+1);
+
+  int cnt=0;
+  t=millis();
+  while(millis()-t<tmout){          //until timeout
+    while(WIFI.available()){
+//      int d;
+      
+//      d=WIFI.read();
+//  Serial.print(d);
+//      if(cnt < NTP_PACKET_SIZE) packetBuffer[cnt++] = d;
+//    Serial.print(cnt);
+//    Serial.print(": ");
+//    Serial.print( d);
+
+      
+      if(WIFI.find(r)){return 1;}   //response good
+    }    
+  }
+
+//  String myString = String((char *)packetBuffer);
+//  Serial.println(myString);
+return 0;       //response not found
+}
+
+void getNtpTime() {
+  ntpStatus=0;     //to display status info of NTP calls on webpage
+  ntpLastLookupTime = rtc.now();
+
+  int serverCount = sizeof NTP_SERVERS / sizeof NTP_SERVERS[0];
+  for( int i = 0; i < serverCount; i++) {
+    strcpy_P(getreq, (char*)pgm_read_word(&(NTP_SERVERS[i][1]))); 
+    callNtpTimeServer(getreq);
+    if(ntpStatus == 0) {
+      return;
+    }
+  }
+}
+
+void callNtpTimeServer(char* ipAddress) {
+  sprintf_P(pktbuf, NTP_CONNECT_CMD, ipAddress);
+  int resp = WIFIcmd(pktbuf,ok,10000);                                               //reset
+//  int resp = WIFIcmd2(F("AT+CIPSTART=0,\"UDP\",\"129.250.35.250\",123"),ok,10000);                                               //reset
+
+  if(!resp) {
+    ntpStatus=1;
+    return;
+  }
+  int cxn=0;
+
+  const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
+
+  memset(pktbuf, 0, NTP_PACKET_SIZE+1);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  pktbuf[0] = 0b11100011;   // LI, Version, Mode
+  pktbuf[1] = 0;     // Stratum, or type of clock
+  pktbuf[2] = 6;     // Polling Interval
+  pktbuf[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  pktbuf[12]  = 49;
+  pktbuf[13]  = 0x4E;
+  pktbuf[14]  = 49;
+  pktbuf[15]  = 52;  
+  
+  WIFI.print(F("AT+CIPSEND="));           //send data
+  WIFI.print(cxn);                     //to client
+  WIFI.print(F(","));              
+  WIFI.println(NTP_PACKET_SIZE);                //data has length
+  delay(50);
+  WIFI.find(">");
+  WIFI.write(pktbuf, NTP_PACKET_SIZE);                          //data
+  delay(100);
+  WIFI.find("SEND OK");
+
+  memset(pktbuf, 0, NTP_PACKET_SIZE+1);
+  int tcnt = 0;
+  int cnt = 0;
+  bool readData = false;
+
+  // Timeout in 5 seconds
+  int tmout = 5000;
+  int t=millis();
+  while(millis()-t<tmout && cnt < NTP_PACKET_SIZE){          //until timeout
+    while(WIFI.available()) {
+      int d=WIFI.read();
+      tcnt++;
+      if(readData) {
+         pktbuf[cnt] = d;
+         cnt++;
+      } else {
+        if(d == ':') {
+          //Serial.println("data found");
+          readData = true;
+        }
+      }
+    }
+  delay(500);
+  }
+ 
+  Serial.print(F("bytes read "));
+  Serial.println( cnt);
+  Serial.print(F("tbytes read "));
+  Serial.println(tcnt);
+  Serial.print(pktbuf[40]);
+  Serial.print(F("  "));
+  Serial.print(pktbuf[41]);
+  Serial.print(F("  "));
+  Serial.print(pktbuf[42]);
+  Serial.print(F("  "));
+  Serial.println(pktbuf[43]);
+//  Serial.println( (char *) pktbuf);
+//  String myString = String((char *)pktbuf);
+//  Serial.println(myString);
+//  Serial.println(F("End"));
+  WIFIcmd(F("AT+CIPCLOSE=0"),ok,5000);                                               //reset
+
+  if(cnt < NTP_PACKET_SIZE) {
+    ntpStatus=2;
+    return;
+  }
+ 
+  unsigned long highWord = word(pktbuf[40], pktbuf[41]);
+  unsigned long lowWord = word(pktbuf[42], pktbuf[43]);
+  // combine the four bytes (two words) into a long integer
+  // this is NTP time (seconds since Jan 1 1900):
+  unsigned long secsSince1900 = highWord << 16 | lowWord;
+  Serial.print(F("Seconds since Jan 1 1900 = "));
+  Serial.println(secsSince1900);
+
+  DateTime now = rtc.now();                   //capture time
+
+  // now convert NTP time into everyday time:
+  Serial.print("Unix time = ");
+  // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+  const unsigned long seventyYears = 2208988800UL;
+
+  const unsigned long tenHours = 36000UL;
+
+  // subtract seventy years:
+  unsigned long epoch = secsSince1900 - seventyYears;
+  // print Unix time:
+  Serial.println(epoch);
+
+  Serial.print(F("cloc             "));
+  sprintf_P(pktbuf, TIME_FORMAT, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second());
+  //Serial.println(now.unixtime());
+  Serial.println(pktbuf);
+  DateTime compileTime = DateTime(epoch);
+  Serial.print(F("ep unix          "));
+  sprintf_P(pktbuf, TIME_FORMAT, compileTime.year(), compileTime.month(), compileTime.day(), compileTime.hour(),compileTime.minute(),compileTime.second());
+     Serial.println(pktbuf);
+     //Serial.println(compileTime.unixtime());
+
+     compileTime = DateTime(secsSince1900);
+     Serial.print(F("since 1900 unix  "));
+     sprintf_P(pktbuf, TIME_FORMAT, compileTime.year(), compileTime.month(), compileTime.day(), compileTime.hour(),compileTime.minute(),compileTime.second());
+     Serial.println(pktbuf);
+     Serial.print(F("DateTime size = "));
+     Serial.println(sizeof(compileTime));
+
+     //Serial.println(compileTime.unixtime());
+
+     epoch+=tenHours;
+     compileTime = DateTime(epoch);
+    
+     Serial.print(F("ep unix adjusted "));
+     sprintf_P(pktbuf, TIME_FORMAT, compileTime.year(), compileTime.month(), compileTime.day(), compileTime.hour(),compileTime.minute(),compileTime.second());
+     Serial.println(pktbuf);
+    int year = compileTime.year();
+
+  if(year < 2017 || year > 2050) {
+    ntpStatus=3;
+    return;
+  }
+
+  Serial.print(F("updating time"));
+  rtc.adjust(compileTime);
+  ntpStatus=0;
 }
 
