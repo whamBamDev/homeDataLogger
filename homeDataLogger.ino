@@ -109,7 +109,6 @@ const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 #define PKTSIZE 129
 //#define PKTSIZE 257
 //#define PKTSIZE 161
->>>>>>> 3e94e9004be0094b437201903b063cf7d7deac1b
 #define SBUFSIZE 20
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
