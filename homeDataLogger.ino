@@ -109,6 +109,7 @@ const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 #define PKTSIZE 129
 //#define PKTSIZE 257
 //#define PKTSIZE 161
+>>>>>>> 3e94e9004be0094b437201903b063cf7d7deac1b
 #define SBUFSIZE 20
 char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
@@ -430,12 +431,14 @@ void sendstatus(){                                   //to show logger status
   WIFI.print(cxn);                                   //to client
   WIFI.print(F(","));        
 
+  /*
   int ntpYear   = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.year() : 0;
   int ntpMonth  = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.month() : 0;
   int ntpDay    = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.day() : 0;
   int ntpHour   = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.hour() : 0;
   int ntpMinute = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.minute() : 0;
   int ntpSecond = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.second() : 0;
+  */
   
   DateTime now = rtc.now();
   sprintf_P(pktbuf, STATUS_TEXT, status, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second());
@@ -460,7 +463,6 @@ void servepage(){                                     //for serving a page of da
   delay(250);
   WIFIpurge();
 }
-
 
 void listpage(){                                     //for serving a page of data
   WIFI.print(AT_CMD_SEND);                            //send data
