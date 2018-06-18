@@ -38,8 +38,9 @@ const char HTTP_HEADER_GET[] PROGMEM = "GET ";
 const char URL_FILE_INDEX_1[] PROGMEM = "index.htm";
 const char URL_FILE_INDEX_2[] PROGMEM = "index.html";
 const char URL_FILE_LIST[] PROGMEM = "list.html";
+const char URL_API_WATERTANK[] PROGMEM = "api/waterTank";
 
-const char INDEX_LINE[] PROGMEM = "<a href=\"%s\">Download %s</a><br>\n";
+const char INDEX_LINE[] PROGMEM = "<li><a href=\"%s\">Download %s</a></li>\n";
 
 #define TEN_HOURS_IN_SECONDS (10 * 60 * 60)
 
@@ -66,11 +67,11 @@ RTC_DS1307 rtc;
 //LED pins- LED1 is diagnostic, LED2 is card in use (flickers during write)
 #define LED1 4
 #define LED2 3
-long sampleTime;   //keeps track of logging interval
+long sampleTime;      //keeps track of logging interval
 int temp,hum,light;   //variables to log
-int status=0;     //to display status info on webpage
+int status=0;         //to display status info on webpage
 
-int ntpStatus=0;     //to display status info of NTP calls on webpage
+int ntpStatus=0;      //to display status info of NTP calls on webpage
 DateTime ntpLastLookupTime = NULL;
 
 //for DHT11 interface
@@ -87,14 +88,15 @@ int DHTstatus=0;
 #define USMAX 3000  //??
 #define USTIMEOUT_2M   11600  // Timeout for 2m
 #define US_TIMEOUT_2_5M 14500  // Timeout for 2.5m
-#define US_TIMEOUT_4M   23200  // Timeout for 2m
 
 #define WIFI Serial
 #define AT_CMD_SEND F("AT+CIPSEND=")
 #define AT_CMD_CLOSE F("AT+CIPCLOSE=")
 
 #define HTTPINDEX_START F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Click <a href=\"list.html\">list</a> to see the files that are availble to download.<br><br>\r\n")
-#define HTTPLIST F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Choose a file:<br>\r\n")
+#define HTTPINDEX_START_2 F("<h3>API</h3><ul><li><a href=\"api/waterTank\">Water tank levels</a></li></ul><br>\r\n")
+#define HTTPLIST F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Choose a file:<ul>\r\n")
+#define HTTPLIST_2 F("</ul>")
 #define HTTP404 F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>")
 #define HTTPJSON F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
 #define STATUSTITLE F("<br>Status (zero is no error): ")
@@ -103,14 +105,15 @@ int DHTstatus=0;
 const char STATUS_TEXT[] PROGMEM = "<br>Status (zero is no error): %d<br>Current time: %04d-%02d-%02d %02d:%02d:%02d<br>";
 #define HTMLEND F("</body></html>")
 
+const char API_WATER_TANK_DATA[] PROGMEM = "{ \"waterTank\": { \"emptySpaceA\": %d, \"emptySpaceB\": %d}}";
+
 const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 
 // sketch needs ~450 bytes local space to not crash
-#define PKTSIZE 129
+//#define PKTSIZE 129
 //#define PKTSIZE 257
-//#define PKTSIZE 161
+#define PKTSIZE 161
 #define SBUFSIZE 20
-char getreq[SBUFSIZE]="";   //for GET request
 char fname[SBUFSIZE]="";    //filename
 char currentFilename[SBUFSIZE]="";    //filename
 int cxn=-1;                 //connection number
@@ -369,7 +372,9 @@ void dorequest(){
   int p=0;                             //pointer to getreq position
   int f=1;                             //flag to tell if first line or not
   int crcount=0;                       //if we get two CR/LF in a row, request is complete
-  getreq[0]=0;                         //clear string  
+  memset(pktbuf, 0, PKTSIZE);
+  
+  pktbuf[0]=0;                         //clear string  
   t=millis()+1000;                     //wait up to a second for data, shouldn't take more than 125ms for 1460 byte MTU
   while((millis()<t)&&(crcount<2)){    //drop out if <CR><LF><CR><LF> seen or timeout
     if(WIFI.available()){
@@ -378,9 +383,10 @@ void dorequest(){
       if(d>31){                        //if an ASCII character
         crcount=0;                     //clear CR count
         if(f==1){                      //on first line
-          getreq[p]=d;                 //add to GET buffer
-          p++;
-          getreq[p]=0;
+          if(p < sizeof(pktbuf)) {
+            pktbuf[p]=d;               //add to GET buffer, but do not overrun the buffer.
+            p++;
+          }
         }
       }
       if(d==13){                       //if CR found increase CR count
@@ -391,8 +397,8 @@ void dorequest(){
   }
   fname[0]=0;                                              //blank
   
-  if( strncmp_P(getreq, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) != 0){crcount=0;}   //no 'GET ' at the start, so change flag to cancel
-  if(crcount==2){parseFileName();}                                                       //complete request found, extract name of requested file
+  if( strncmp_P(pktbuf, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) != 0){crcount=0;}   //no 'GET ' at the start, so change flag to cancel
+  if(crcount==2){parseFileName(pktbuf);}                                                       //complete request found, extract name of requested file
   if(fname[0]==0 || strcmp_P(fname,URL_FILE_INDEX_1) == 0 || strcmp_P(fname,URL_FILE_INDEX_2) == 0){
     servepage();
     sendstatus();
@@ -401,26 +407,35 @@ void dorequest(){
     listpage();
     sendstatus();
     crcount=0;                                      //serve index page, reset crcount on fileserve
+  } else if(strcmp_P(fname, URL_API_WATERTANK) == 0){
+    getWaterTankLevels();
+    crcount=0;
   } else {
-    crcount = sendcsv(fname);                                 //serve entire data file
+    crcount = sendcsv(fname);                       //serve entire data file
   }
-  if(crcount){serve404();sendstatus();}                                                    //no valid file served => 404 error
-  WIFI.print(AT_CMD_CLOSE);                                                           //close
+
+  if(crcount){serve404();sendstatus();}             //no valid file served => 404 error
+  WIFI.print(AT_CMD_CLOSE);                         //close
   WIFI.print(cxn);  
-  WIFIcmd(F(""),ok,2000);                                                                     //disconnect
-  cxn=-1;                                                                                  //clear for next connection
+  WIFIcmd(F(""),ok,2000);                           //disconnect
+  cxn=-1;                                           //clear for next connection
 }
 
 
-void parseFileName(){
-  fname[0]=0;                                              //blank
-  int p=5;                                                 //start after 'GET /'
-  int t=0;                                                 //use ? to separate fields, ' ' to end
-  while((getreq[p]!=' ')&&(getreq[p])&&(getreq[p]!='?')){  //terminate on space or end of string or ?
-    fname[strlen(fname)+1]=0;                              //add to fname
-    fname[strlen(fname)]=getreq[p];
+void parseFileName(char *requestLine){
+  int t=0;                   
+  fname[0]=0;                                       //blank
+  int p=5;                                          //start after 'GET /'
+  while((requestLine[p]!=' ')                       //use ? to separate fields, ' ' to end
+        &&(requestLine[p])
+        &&(requestLine[p]!='?')){                   //terminate on space or end of string or ?
+    fname[t]=requestLine[p];
+    t++;
+    fname[t]=0;                                     //add to fname
     p++;
-    if(p>SBUFSIZE-2){p=SBUFSIZE-2;}                        //check bounds
+    if( !(t<SBUFSIZE)) {                            //check bounds
+      return;
+    }
   }
 }
 
@@ -456,9 +471,10 @@ void servepage(){                                     //for serving a page of da
   WIFI.print(AT_CMD_SEND);                            //send data
   WIFI.print(cxn);                                    //to client
   WIFI.print(F(","));              
-  WIFI.println(strlen_PF(HTTPINDEX_START));           //data has length, needs to be same as string below
+  WIFI.println(strlen_PF(HTTPINDEX_START)+strlen_PF(HTTPINDEX_START_2));           //data has length, needs to be same as string below
   delay(50);
   WIFI.print(HTTPINDEX_START);
+  WIFI.print(HTTPINDEX_START_2);
   delay(250);
   WIFIpurge();
 }
@@ -476,20 +492,30 @@ void listpage(){                                     //for serving a page of dat
   File root = SD.open("/",FILE_READ);
   root.seek(0);
   while (true) {
-     File entry =  root.openNextFile();
-     if (! entry) {
-       // no more files
-       break;
-     }
-     if (! entry.isDirectory()) {
-       // files have sizes, directories do not
-       //<a href=\"DATA.CSV\">Download DATA.CSV</a><br>
-       sprintf_P(pktbuf, INDEX_LINE, entry.name(), entry.name());
-       WIFIsenddata(pktbuf,cxn);
-     }
-     entry.close();
-   }
-   root.close();
+    File entry =  root.openNextFile();
+    if (! entry) {
+      // no more files
+      break;
+    }
+    if (! entry.isDirectory()) {
+      // files have sizes, directories do not
+      //<a href=\"DATA.CSV\">Download DATA.CSV</a><br>
+      sprintf_P(pktbuf, INDEX_LINE, entry.name(), entry.name());
+      WIFIsenddata(pktbuf,cxn);
+    }
+    entry.close();
+  }
+  root.close();
+
+  WIFI.print(AT_CMD_SEND);                            //send data
+  WIFI.print(cxn);                                    //to client
+  WIFI.print(F(","));              
+  WIFI.println(strlen_PF(HTTPLIST_2));                //data has length, needs to be same as string below
+  delay(50);
+  WIFI.print(HTTPLIST_2);
+  delay(250);
+  WIFIpurge();
+   
 }
 
 void serve404(){                                //for serving a page of data
@@ -544,6 +570,22 @@ int sendcsv(char *filename){             //for providing a csv document to downl
   return 0;
 }
 
+void getWaterTankLevels(){                                     //Returns JSON with the current levels of the water tanks.
+  int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M);
+  int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M);
+
+  sprintf_P(pktbuf, API_WATER_TANK_DATA, distanceA, distanceB);
+
+  WIFI.print(F("AT+CIPSEND="));          //send data
+  WIFI.print(cxn);                       //to client
+  WIFI.print(F(","));
+  WIFI.println(strlen_PF(HTTPJSON)+strlen(pktbuf));     //data has length, needs to be same as string below
+  delay(50);
+  WIFI.print(HTTPJSON);                  //send HTTP header for csv data type, file content to follow
+  WIFI.print(pktbuf);
+  delay(250);
+  WIFIpurge();
+}
 
 void wifiinit(){
   WIFIcmd(F("AT+RST"),"ready\r\n",5000);                                               //reset
@@ -747,11 +789,12 @@ return 0;       //response not found
 void getNtpTime() {
   ntpStatus=0;     //to display status info of NTP calls on webpage
   ntpLastLookupTime = rtc.now();
+  char ipAddress[SBUFSIZE]="";   //for GET request
 
   int serverCount = sizeof NTP_SERVERS / sizeof NTP_SERVERS[0];
   for( int i = 0; i < serverCount; i++) {
-    strcpy_P(getreq, (char*)pgm_read_word(&(NTP_SERVERS[i][1]))); 
-    callNtpTimeServer(getreq);
+    strcpy_P(ipAddress, (char*)pgm_read_word(&(NTP_SERVERS[i][1]))); 
+    callNtpTimeServer(ipAddress);
     if(ntpStatus == 0) {
       return;
     }
