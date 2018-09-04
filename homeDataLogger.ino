@@ -30,15 +30,19 @@ const char * const NTP_SERVERS[][2] PROGMEM = {
   {UTP3_HOST, UTP3_IP}
 };
 
+const char JSON_EXT[] PROGMEM = ".JS";
 const char FILENAME[] PROGMEM = "%04d%02d%02d.JS";
 const char XML_DATE[] PROGMEM = "%04d-%02d-%02d";
 const char XML_TIME[] PROGMEM = "%02d:%02d:%02d";
+const char XML_INT[] PROGMEM = "%d";
 
 const char HTTP_HEADER_GET[] PROGMEM = "GET ";
 const char URL_FILE_INDEX_1[] PROGMEM = "index.htm";
 const char URL_FILE_INDEX_2[] PROGMEM = "index.html";
 const char URL_FILE_LIST[] PROGMEM = "list.html";
+const char URL_WIFI_STATUS[] PROGMEM = "wiFiStatus.html";
 const char URL_API_WATERTANK[] PROGMEM = "api/waterTank";
+const char URL_API_OUTSIDE[] PROGMEM = "api/outside";
 
 const char INDEX_LINE[] PROGMEM = "<li><a href=\"%s\">Download %s</a></li>\n";
 
@@ -47,9 +51,13 @@ const char INDEX_LINE[] PROGMEM = "<li><a href=\"%s\">Download %s</a></li>\n";
 #define JSON_START F("[\r\n")
 #define JSON_END F("\r\n]")
 #define JSON_NULL F("null")
+#define COMMA F(",")
 
 // Every 10 minutes.
-#define LOGINTERVAL 10 * 60
+#define LOGINTERVAL (10L * 60L * 1000L)
+#define WIFILOGINTERVAL (30L * 60L * 1000L)
+
+
 #define LIGHTPIN A0
 
 #define TEMP_A_PIN A0
@@ -68,8 +76,9 @@ RTC_DS1307 rtc;
 #define LED1 4
 #define LED2 3
 long sampleTime;      //keeps track of logging interval
-int temp,hum,light;   //variables to log
+long wifiLogTime;      //keeps track of logging interval
 int status=0;         //to display status info on webpage
+unsigned long lastSampleTimeUnix = 0;
 
 int ntpStatus=0;      //to display status info of NTP calls on webpage
 DateTime ntpLastLookupTime = NULL;
@@ -77,8 +86,12 @@ DateTime ntpLastLookupTime = NULL;
 //for DHT11 interface
 //#define DHT11PIN 8
 #define DHT11PIN 2
-byte DHTtemp,DHThum;
-int DHTstatus=0;
+struct dht11Response_t {
+  int status;
+  int temperature;
+  int humidity;
+} ;
+
 
 // UltraSonic module
 #define USONIC_1_TRIG 7
@@ -92,20 +105,38 @@ int DHTstatus=0;
 #define WIFI Serial
 #define AT_CMD_SEND F("AT+CIPSEND=")
 #define AT_CMD_CLOSE F("AT+CIPCLOSE=")
+#define AT_CMD_WIFI_STATUS F("AT+CIPSTATUS")
+#define AT_CMD_FIRMWARE F("AT+GMR")
+#define AT_CMD_DISCONNECT F("AT+CWQAP")
+
+#define AT_REPLY_OK F("OK")
+#define AT_REPLY_SEND_OK F("SEND OK")
+#define AT_REPLY_READY F("ready")
+#define AT_REPLY_GOT_IP F("WIFI GOT IP")
+#define AT_READY_TO_SEND F(">")
+
+//#define AT_READY_TO_SEND F("STATUS:4")
 
 #define HTTPINDEX_START F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Click <a href=\"list.html\">list</a> to see the files that are availble to download.<br><br>\r\n")
-#define HTTPINDEX_START_2 F("<h3>API</h3><ul><li><a href=\"api/waterTank\">Water tank levels</a></li></ul><br>\r\n")
+#define HTTPINDEX_START_2 F("<h3>API</h3><ul><li><a href=\"api/waterTank\">Water tank levels</a></li><li><a href=\"api/outside\">Outside climate</a></li></ul><br><h3>Status</h3><ul><li><a href=\"wiFiStatus.html\">WiFi Status</a></li></li></ul><br>\r\n")
 #define HTTPLIST F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI DATALOGGER</h2><br>Choose a file:<ul>\r\n")
 #define HTTPLIST_2 F("</ul>")
+#define HTTPWIFI_STATUS_1 F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI STATUS</h2><h4>Status</h4><br><samp>\r\n")
+#define HTTPWIFI_STATUS_2 F("</samp>\r\n")
+#define HTTPWIFI_STATUS_3 F("<br><h4>Firmware Version</h4><samp>\r\n")
 #define HTTP404 F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>")
 #define HTTPJSON F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+#define HTTPTEXT F("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n")
 #define STATUSTITLE F("<br>Status (zero is no error): ")
 // Too big for pktbuf buffer
 //const char STATUS_TEXT[] PROGMEM = "<br>Status (zero is no error): %d<br>Current time: %04d-%02d-%02d %02d:%02d:%02d<br>NTP Status (zero is no error): %d - last check time: %04d-%02d-%02d %02d:%02d:%02d";
 const char STATUS_TEXT[] PROGMEM = "<br>Status (zero is no error): %d<br>Current time: %04d-%02d-%02d %02d:%02d:%02d<br>";
+const char STATUS_TEXT2[] PROGMEM = "Last sample taken at: %04d-%02d-%02d %02d:%02d:%02d<br>Free memory: %d<br>";
 #define HTMLEND F("</body></html>")
+#define HTMLBR F("<br>")
 
 const char API_WATER_TANK_DATA[] PROGMEM = "{ \"waterTank\": { \"emptySpaceA\": %d, \"emptySpaceB\": %d}}";
+const char API_OUTSIDE_CLIMATE_DATA[] PROGMEM = "{ \"outside\": { \"temperature\": %d, \"humidity\": %d, \"lightLevel\": %d}}";
 
 const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 
@@ -118,12 +149,6 @@ char fname[SBUFSIZE]="";    //filename
 char currentFilename[SBUFSIZE]="";    //filename
 int cxn=-1;                 //connection number
 char pktbuf[PKTSIZE]="";    //to consolidate data for sending
-const char ok[]= "OK\r\n";         //OK response is very common
-const char SEND_OK[] = "SEND OK";         //OK response is very common
-
-const char SEND_DATA[] PROGMEM = "AT+CIPSEND=";
-
-const char COMMA[] = ",";
 
 
 void setup() {
@@ -133,7 +158,7 @@ void setup() {
   usonicSetup(USONIC_2_TRIG, USONIC_2_ECHO); //set up ultrasonic sensor
 
   wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
-  DHTsetup();           //start temp/humidity sensor
+  setupDHT11(DHT11PIN);           //start temp/humidity sensor
 
   //getNtpTime();
 
@@ -171,15 +196,17 @@ void setup() {
   }
   fhandle.close(); //then close the file
 
-  sampleTime = millis() + 10000;   //Wait for a second before the first sample.
+  sampleTime = millis() + 10000;   //Wait for 10 seconds before the first sample.
+  wifiLogTime = millis() + 10000;
 }
 
 void loop() {
   if(millis()>sampleTime){   //if it's been more than logging interval
-    getvalue();                           //fetch data to log
+    dht11Response_t dht11Response = readDHT11(DHT11PIN);     //fetch data to log
     int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
     int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
 
+    int light = -1;
     //light=analogRead(LIGHTPIN);     //get light sensor data
     float temperatureA = readThermister(TEMP_A_PIN);
     float temperatureB = readThermister(TEMP_B_PIN);
@@ -194,12 +221,17 @@ void loop() {
     //Serial.print(F("DHTtemp=")); Serial.println(DHTtemp);
     //Serial.print(F("DHThum=")); Serial.println(DHThum);
 
-    logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, distanceB);          //log it
+    logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, distanceB, dht11Response, light);          //log it
 
 //    sampleTime+=(LOGINTERVAL*10L);        //add interval, so interval is precise
-    sampleTime+=(LOGINTERVAL*1000L);        //add interval, so interval is precise
+    sampleTime+=LOGINTERVAL;        //add interval, so interval is precise
   }
   checkwifi();  
+
+  if(millis()>wifiLogTime){   //if it's been more than logging interval
+    logWiFiStatusToCard();
+    wifiLogTime += WIFILOGINTERVAL;
+  }
 }
 
 double readThermister(int pin) {
@@ -210,14 +242,6 @@ double readThermister(int pin) {
   temp = 1 / (0.001129148 + (0.000234125 + (0.0000000876741 * temp * temp ))* temp );
   temp = temp - 273.15; // Convert Kelvin to Celcius
   return temp;
-}
-
-void getvalue(){                  //put subroutine for getting data to log here
-  DHTtemp=0;                      //zero values to detect errors
-  DHThum=0;
-  DHTstatus=DHT11();              //DHTstatus=0 if error
-  temp=DHTtemp;                   //DHT11() loads temp into DHTtemp      
-  hum=DHThum;                     //DHT11() loads humidity into DHThum
 }
 
 
@@ -237,9 +261,11 @@ File openDataFile(){      //put the column headers you would like here, if you d
   return SD.open(fname, FILE_WRITE);
 }
 
-void logtocard(float temperatureA, float temperatureB, float temperatureC, float temperatureD, int distanceA, int distanceB){
+void logtocard(float temperatureA, float temperatureB, float temperatureC, float temperatureD, int distanceA, int distanceB,
+    dht11Response_t dht11Response, int lightLevel){
   unsigned long timestamp;
   DateTime now = rtc.now();                   //capture time
+  lastSampleTimeUnix = now.unixtime();
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
   
@@ -266,11 +292,11 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   fhandle.println(F("+10\","));
 
   fhandle.print(F("  \"outside\": { \"temperature\": "));
-  if(DHTstatus){fhandle.print(temp);}else{fhandle.print(JSON_NULL);}         //put data if valid otherwise blank (will be blank cell in Excel)
+  if(dht11Response.status){fhandle.print(dht11Response.temperature);}else{fhandle.print(JSON_NULL);}         //put data if valid otherwise blank (will be blank cell in Excel)
   fhandle.print(F(", \"humidity\": "));
-  if(DHTstatus){fhandle.print(hum);}else{fhandle.print(JSON_NULL);}          //put data if valid otherwise blank
+  if(dht11Response.status){fhandle.print(dht11Response.humidity);}else{fhandle.print(JSON_NULL);}          //put data if valid otherwise blank
   fhandle.print(F(", \"lightLevel\": "));
-  fhandle.print(light);                       //put data (can't validate analog input)
+  fhandle.print(lightLevel);                       //put data (can't validate analog input)
   fhandle.println(F("},"));
 
   fhandle.print(F("  \"inside\": { \"temperatureA\": "));
@@ -297,51 +323,111 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
 }
 
-void DHTsetup(){                    //set pin to output, set high for idle state
-  pinMode(DHT11PIN,OUTPUT);
-  digitalWrite(DHT11PIN,HIGH);
+File openWifiLogFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
+  strcpy_PF(pktbuf, F("WIFI.LOG"));
+  return SD.open(pktbuf, FILE_WRITE);
 }
 
-int DHT11(){                    //returns 1 on ok, 0 on fail (eg checksum, data not received)
+void logWiFiStatusToCard(){
+  unsigned long timestamp;
+  DateTime now = rtc.now();                   //capture time
+  lastSampleTimeUnix = now.unixtime();
+  digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
+  delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
+  
+  File fhandle = openWifiLogFile();
+  if(!fhandle){                     // Cannot open the file, raise an error.
+    errorflash(6);
+  }
+
+  unsigned long s;
+    
+  // Timestamp format ISO 8601: 2017-12-26T07:44:19+10
+  fhandle.print(F("\r\n==================================================\r\n== Status Time: "));
+  sprintf_P(pktbuf, XML_DATE, now.year(), now.month(), now.day());
+  fhandle.print(pktbuf);
+  fhandle.print(F("T"));
+  sprintf_P(pktbuf, XML_TIME, now.hour(),now.minute(),now.second());
+  fhandle.println(pktbuf);
+  fhandle.print(F("Free Memory: "));
+  sprintf_P(pktbuf, XML_INT, freeMemory());
+  fhandle.println(pktbuf);
+
+  clearPktbuf();
+
+  int len = strlen_PF(AT_REPLY_OK) + 1;
+  char replyStr[len];
+  strcpy_PF(replyStr,AT_REPLY_OK);
+
+  WIFI.println(AT_CMD_WIFI_STATUS);
+
+  unsigned long timeout = 2000 + millis();
+  while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
+    while(WIFI.available()){
+      int c = WIFI.read();
+      if(c != -1){             //response good
+        addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
+        if(c == '\n') {
+          fhandle.print(pktbuf);
+          clearPktbuf();
+        }
+      }
+    }
+  }
+  WIFIpurge();              //clear incoming buffer
+
+  fhandle.close();                            //close file so data is saved
+  digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
+}
+
+void setupDHT11( int pin){                    //set pin to output, set high for idle state
+  pinMode( pin, OUTPUT);
+  digitalWrite( pin, HIGH);
+}
+
+dht11Response_t readDHT11( int pin){        //returns status 1 on ok, 0 on fail (eg checksum, data not received)
   unsigned int n[83];           //to store bit times
   byte p=0;                     //pointer to current bit
   unsigned long t;              //time
   byte old=0;
   byte newd;
-
-  // Set the values 
-  DHTtemp=-1;
-  DHThum=-1;
+  dht11Response_t response;
+  response.status = 0;
+  response.temperature = -1;
+  response.humidity = -1;
   
   for(int i=0;i<83;i++){n[i]=0;}
-  digitalWrite(DHT11PIN,LOW);   //start signal
+  digitalWrite(pin,LOW);   //start signal
   delay(25);
-  digitalWrite(DHT11PIN,HIGH);
+  digitalWrite(pin,HIGH);
   delayMicroseconds(20);
-  pinMode(DHT11PIN,INPUT);
+  pinMode(pin,INPUT);
   delayMicroseconds(40);
   t=micros()+10000L;
   while((micros()<t)&&(p<83)){    //read bits
-    newd=digitalRead(DHT11PIN);
+    newd=digitalRead(pin);
     if(newd!=old){
       n[p]=micros();
       p++;
       old=newd;
     }
   }
-  pinMode(DHT11PIN,OUTPUT);      //reset for next cycle
-  digitalWrite(DHT11PIN,HIGH);
-  if(p!=83){return 0;}           //not a valid datastream
+  pinMode(pin,OUTPUT);      //reset for next cycle
+  digitalWrite(pin,HIGH);
+  if(p!=83){return response;}           //not a valid datastream
   byte data[5]={0,0,0,0,0};
   for(int i=0;i<40;i++){         //store data in array
     if(n[i*2+3]-n[i*2+2]>50){data[i>>3]=data[i>>3]|(128>>(i&7));}
   }
   byte k=0;     //checksum
   for(int i=0;i<4;i++){k=k+data[i];}
-  if((k^data[4])){return 0;}      //checksum error
-  DHTtemp=data[2];                //temperature
-  DHThum=data[0];                 //humidity
-  return 1;                       //data valid
+  if((k^data[4])){return response;}      //checksum error
+  //DHTtemp=data[2];                //temperature
+  //DHThum=data[0];                 //humidity
+  response.status = 1;
+  response.temperature = data[2];
+  response.humidity = data[0];
+  return response;                       //data valid
 }
 
 void errorflash(int n){           //non-recoverable error, flash code on LED1
@@ -367,12 +453,13 @@ void usonicSetup(int trigPin, int echoPin){
   digitalWrite(trigPin, LOW);
 }
 
+
 void dorequest(){
-  long t;                              //timeout
+  unsigned long t;                     //timeout
   int p=0;                             //pointer to getreq position
   int f=1;                             //flag to tell if first line or not
   int crcount=0;                       //if we get two CR/LF in a row, request is complete
-  memset(pktbuf, 0, PKTSIZE);
+  clearPktbuf();
   
   pktbuf[0]=0;                         //clear string  
   t=millis()+1000;                     //wait up to a second for data, shouldn't take more than 125ms for 1460 byte MTU
@@ -400,24 +487,33 @@ void dorequest(){
   if( strncmp_P(pktbuf, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) != 0){crcount=0;}   //no 'GET ' at the start, so change flag to cancel
   if(crcount==2){parseFileName(pktbuf);}                                                       //complete request found, extract name of requested file
   if(fname[0]==0 || strcmp_P(fname,URL_FILE_INDEX_1) == 0 || strcmp_P(fname,URL_FILE_INDEX_2) == 0){
-    servepage();
-    sendstatus();
+    servePage();
+    sendStatus();
     crcount=0;                                      //serve index page, reset crcount on fileserve
   } else if(strcmp_P(fname, URL_FILE_LIST) == 0){
-    listpage();
-    sendstatus();
+    listPage();
+    sendStatus();
+    crcount=0;                                      //serve index page, reset crcount on fileserve
+  } else if(strcmp_P(fname, URL_WIFI_STATUS) == 0){
+    displayWiFiStatus();
+    sendStatus();
     crcount=0;                                      //serve index page, reset crcount on fileserve
   } else if(strcmp_P(fname, URL_API_WATERTANK) == 0){
     getWaterTankLevels();
     crcount=0;
+  } else if(strcmp_P(fname, URL_API_OUTSIDE) == 0){
+    getOutsideClimate();
+    crcount=0;
   } else {
-    crcount = sendcsv(fname);                       //serve entire data file
+    crcount = sendFile(fname);                       //serve entire data file
   }
 
-  if(crcount){serve404();sendstatus();}             //no valid file served => 404 error
+  if(crcount){serve404();sendStatus();}             //no valid file served => 404 error
+
+  delay(100);
   WIFI.print(AT_CMD_CLOSE);                         //close
-  WIFI.print(cxn);  
-  WIFIcmd(F(""),ok,2000);                           //disconnect
+  WIFI.println(cxn);  
+  wiFiWaitForOkReply();                             //disconnect
   cxn=-1;                                           //clear for next connection
 }
 
@@ -440,10 +536,7 @@ void parseFileName(char *requestLine){
 }
 
 
-void sendstatus(){                                   //to show logger status
-  WIFI.print(AT_CMD_SEND);                           //send data
-  WIFI.print(cxn);                                   //to client
-  WIFI.print(F(","));        
+void sendStatus(){                                   //to show logger status
 
   /*
   int ntpYear   = (&ntpLastLookupTime == NULL) ? ntpLastLookupTime.year() : 0;
@@ -455,42 +548,56 @@ void sendstatus(){                                   //to show logger status
   */
   
   DateTime now = rtc.now();
+
+  WIFI.print(AT_CMD_SEND);                           //send data
+  WIFI.print(cxn);                                   //to client
+  WIFI.print(F(","));        
   sprintf_P(pktbuf, STATUS_TEXT, status, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second());
 // Full status was too big for pktbuf buffer.
 //  sprintf_P(pktbuf, STATUS_TEXT, status, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second(),
 //     ntpStatus, ntpYear, ntpMonth, ntpDay, ntpHour, ntpMinute, ntpSecond);
-  WIFI.println(strlen(pktbuf) + strlen_PF(HTMLEND));            //data has length, needs to be same as string below, plus 1 for status
+  WIFI.println(strlen(pktbuf));            //data has length, needs to be same as string below, plus 1 for status
   delay(50);
   WIFI.print(pktbuf);
+  wiFiWaitForSendOkReply();
+
+  int lsYear   = 0;
+  int lsMonth  = 0;
+  int lsDay    = 0;
+  int lsHour   = 0;
+  int lsMinute = 0;
+  int lsSecond = 0;
+  if( lastSampleTimeUnix > 0) {
+    DateTime lastSampleTime = DateTime( lastSampleTimeUnix);
+    lsYear   = lastSampleTime.year();
+    lsMonth  = lastSampleTime.month();
+    lsDay    = lastSampleTime.day();
+    lsHour   = lastSampleTime.hour();
+    lsMinute = lastSampleTime.minute();
+    lsSecond = lastSampleTime.second();
+  }
+
+  sprintf_P(pktbuf, STATUS_TEXT2, lsYear, lsMonth, lsDay, lsHour, lsMinute, lsSecond, freeMemory());
+  wiFiSendStart(cxn, strlen(pktbuf) + strlen_PF(HTMLEND));
+  WIFI.print(pktbuf);
   WIFI.print(HTMLEND);
-  delay(250);
-  WIFIpurge();
+  wiFiWaitForSendOkReply();
 }
 
-void servepage(){                                     //for serving a page of data
-  WIFI.print(AT_CMD_SEND);                            //send data
-  WIFI.print(cxn);                                    //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen_PF(HTTPINDEX_START)+strlen_PF(HTTPINDEX_START_2));           //data has length, needs to be same as string below
-  delay(50);
-  WIFI.print(HTTPINDEX_START);
-  WIFI.print(HTTPINDEX_START_2);
-  delay(250);
-  WIFIpurge();
+void servePage(){                                     //for serving a page of data
+  WIFIsenddata(HTTPINDEX_START, cxn);
+  WIFIsenddata(HTTPINDEX_START_2, cxn);
 }
 
-void listpage(){                                     //for serving a page of data
-  WIFI.print(AT_CMD_SEND);                            //send data
-  WIFI.print(cxn);                                    //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen_PF(HTTPLIST));                    //data has length, needs to be same as string below
-  delay(50);
-  WIFI.print(HTTPLIST);
-  delay(250);
-  WIFIpurge();
+void listPage(){                                     //for serving a page of data
+  WIFIsenddata(HTTPLIST, cxn);
 
   File root = SD.open("/",FILE_READ);
   root.seek(0);
+
+  int sendLength = -1;
+  clearPktbuf();
+
   while (true) {
     File entry =  root.openNextFile();
     if (! entry) {
@@ -500,50 +607,101 @@ void listpage(){                                     //for serving a page of dat
     if (! entry.isDirectory()) {
       // files have sizes, directories do not
       //<a href=\"DATA.CSV\">Download DATA.CSV</a><br>
-      sprintf_P(pktbuf, INDEX_LINE, entry.name(), entry.name());
-      WIFIsenddata(pktbuf,cxn);
+      sprintf_P(&pktbuf[strlen(pktbuf)], INDEX_LINE, entry.name(), entry.name());
+      if( sendLength == -1) {
+        sendLength = sizeof(pktbuf) - (strlen(pktbuf) + 20);
+      } else if (strlen(pktbuf) > sendLength) {
+        WIFIsenddata(pktbuf,cxn);
+        clearPktbuf();
+      }
     }
     entry.close();
   }
   root.close();
 
-  WIFI.print(AT_CMD_SEND);                            //send data
-  WIFI.print(cxn);                                    //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen_PF(HTTPLIST_2));                //data has length, needs to be same as string below
-  delay(50);
-  WIFI.print(HTTPLIST_2);
-  delay(250);
-  WIFIpurge();
-   
+  if( strlen(pktbuf) > 0) {
+    WIFIsenddata(pktbuf, cxn);
+  }
+
+  WIFIsenddata(HTTPLIST_2, cxn);
 }
 
-void serve404(){                                //for serving a page of data
-  WIFI.print(F("AT+CIPSEND="));                 //send data
-  WIFI.print(cxn);                              //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen_PF(HTTP404));                //data has length, needs to be same as string below
-  delay(50);
-  WIFI.print(HTTP404);
-  delay(250);
-  WIFIpurge();
+void displayWiFiStatus() {
+  WIFIsenddata(HTTPWIFI_STATUS_1, cxn);
+
+  clearPktbuf();
+
+  int len = strlen_PF(AT_REPLY_OK) + 1;
+  char replyStr[len];
+  strcpy_PF(replyStr,AT_REPLY_OK);
+
+  len = strlen_PF(HTMLBR) + 1;
+  char htmlBr[len];
+  strcpy_PF(htmlBr,HTMLBR);
+
+  WIFI.println(AT_CMD_WIFI_STATUS);
+
+  unsigned long timeout = 2000 + millis();
+  while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
+    while(WIFI.available()){
+      int c = WIFI.read();
+      if(c != -1){             //response good
+        if(c== '\n') {
+          if( strlen(pktbuf) < (PKTSIZE - 5)){
+            addtobuffer(pktbuf,PKTSIZE,htmlBr);      //add to buffer
+          }
+        } else {
+          addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
+        }
+      }
+    }
+  }
+  WIFIpurge();              //clear incoming buffer
+  WIFIsenddata( pktbuf, cxn);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
+  WIFIsenddata( HTTPWIFI_STATUS_3, cxn);
+
+  clearPktbuf();
+  timeout = 2000 + millis();
+  WIFI.println(AT_CMD_FIRMWARE);
+  while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
+    while(WIFI.available()){
+      int c = WIFI.read();
+      if(c != -1){             //response good
+        if(c== '\n') {
+          if( strlen(pktbuf) < (PKTSIZE - 5)){
+            addtobuffer(pktbuf,PKTSIZE,htmlBr);      //add to buffer
+          }
+        } else {
+          addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
+        }
+      }
+    }
+  }
+  WIFIpurge();              //clear incoming buffer
+  WIFIsenddata( pktbuf, cxn);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
 }
 
-int sendcsv(char *filename){             //for providing a csv document to download
+void serve404(){                                   //for serving a 404 page. i.e. noting found
+  WIFIsenddata( HTTP404, cxn);
+}
+
+int sendFile(char *filename){             //for providing a csv document to download
   File dataFile = SD.open(filename);     // Open the file and see if it exists.
   if (! dataFile) {
     return 1;
   }
-  
-  WIFI.print(F("AT+CIPSEND="));          //send data
-  WIFI.print(cxn);                       //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen_PF(HTTPJSON));        //data has length, needs to be same as string below
-  delay(50);
-  WIFI.print(HTTPJSON);               //send HTTP header for csv data type, file content to follow
-  delay(250);
 
-  bool appendJsonTail = true;
+  strcpy_P(pktbuf,JSON_EXT);
+  bool appendJsonTail = false;
+  if( strContains( filename, pktbuf)){
+    appendJsonTail = true;
+    WIFIsenddata( HTTPJSON, cxn);
+  } else {
+    WIFIsenddata( HTTPTEXT, cxn);
+  }
+
   pktbuf[0]=0;                           //empty buffer
 
   dataFile.seek(0);
@@ -556,10 +714,10 @@ int sendcsv(char *filename){             //for providing a csv document to downl
     if(strlen(pktbuf)>PKTSIZE-2){       //if buffer full
       WIFIsenddata(pktbuf,cxn);         //send data
       pktbuf[0]=0;                      //empty buffer      
-      }    
-    }
+    }    
+  }
   if(pktbuf[0]){                        //send data if any left in buffer
-      WIFIsenddata(pktbuf,cxn);         //send data
+    WIFIsenddata(pktbuf,cxn);         //send data
   }
   dataFile.close();                      //close file
   if(appendJsonTail) {
@@ -575,31 +733,42 @@ void getWaterTankLevels(){                                     //Returns JSON wi
   int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M);
 
   sprintf_P(pktbuf, API_WATER_TANK_DATA, distanceA, distanceB);
-
-  WIFI.print(F("AT+CIPSEND="));          //send data
-  WIFI.print(cxn);                       //to client
-  WIFI.print(F(","));
-  WIFI.println(strlen_PF(HTTPJSON)+strlen(pktbuf));     //data has length, needs to be same as string below
-  delay(50);
+  wiFiSendStart(cxn, strlen_PF(HTTPJSON)+strlen(pktbuf));
   WIFI.print(HTTPJSON);                  //send HTTP header for csv data type, file content to follow
   WIFI.print(pktbuf);
-  delay(250);
-  WIFIpurge();
+  wiFiWaitForSendOkReply();
 }
 
-void wifiinit(){
-  WIFIcmd(F("AT+RST"),"ready\r\n",5000);                                               //reset
-  WIFIcmd(F("AT+CWQAP"),ok,5000);                                                      //exit any AP's
+void getOutsideClimate(){                      //Returns JSON with the current tempreture, humidity etc.
+  dht11Response_t dht11Response = readDHT11(DHT11PIN); //returns status 1 on ok, 0 on fail (eg checksum, data not received)
+  int light = -1;
+  //int light=analogRead(LIGHTPIN);                //get light sensor data
 
-  WIFIcmd(WIFI_SSID,"WIFI GOT IP\r\n",10000);  //join AP
-  WIFIcmd(F("ATE0"),ok,1000);                                                          //turn echo off
+  sprintf_P(pktbuf, API_OUTSIDE_CLIMATE_DATA, dht11Response.temperature, dht11Response.humidity, light);
+
+  wiFiSendStart(cxn, strlen_PF(HTTPJSON)+strlen(pktbuf));
+  WIFI.print(HTTPJSON);                  //send HTTP header for csv data type, file content to follow
+  WIFI.print(pktbuf);
+  wiFiWaitForSendOkReply();
+}
+
+
+void wifiinit(){
+  WIFIcmd(F("AT+RST"), AT_REPLY_READY, 5000);                    //reset
+  WIFIcmd(F("AT+CWQAP"), AT_REPLY_OK, 5000);                     //exit any AP's
+
+  WIFIcmd(WIFI_SSID, AT_REPLY_GOT_IP, 10000);                    //join AP
+  WIFIcmd(F("ATE0"),AT_REPLY_OK,1000);                                     //turn echo off
   if( strlen_PF(SET_IP) > 0) {
-    WIFIcmd(SET_IP,ok,5000);
+    WIFIcmd(SET_IP,AT_REPLY_OK,5000);
   }
-  WIFIcmd(F("AT+CWMODE=3"),ok,2000);                                                   //station mode only
-  WIFIcmd(F("AT+CIPMUX=1"),ok,2000);                                                   //MUX on (needed for server)
-  WIFIcmd(F("AT+CIPSERVER=1,80"),ok,2000);                                             //server on
-  WIFIcmd(F("AT+CIPSTO=10"),ok,2000);                                                   //disconnect after x time if no data
+  WIFIcmd(F("AT+CWMODE=3"),AT_REPLY_OK,2000);                              //station mode only
+  WIFIcmd(F("AT+CWHOSTNAME=\"donkey\""),AT_REPLY_OK,2000);                     //set the hostname
+  WIFIcmd(F("AT+MDNS=1,\"donkey\",\"iot\",80"),AT_REPLY_OK,2000);                     //set the hostname
+
+  WIFIcmd(F("AT+CIPMUX=1"),AT_REPLY_OK,2000);                              //MUX on (needed for server)
+  WIFIcmd(F("AT+CIPSERVER=1,80"),AT_REPLY_OK,2000);                        //server on
+  WIFIcmd(F("AT+CIPSTO=10"),AT_REPLY_OK,2000);                             //disconnect after x time if no data
 }
 
 void checkwifi(){
@@ -607,51 +776,86 @@ void checkwifi(){
     int d;
     d=WIFI.read();
     if((d>47)&&(d<58)&&(cxn<0)){cxn=d-48;}    //connection number, could come from IPD or CONNECT
-    if(d==':'){digitalWrite(LED2,HIGH);dorequest();digitalWrite(LED2,LOW);}                  //: means end of IPD data, content follows. LED on while busy
+    if(d==':'){                  //: means end of IPD data, content follows. LED on while busy
+      digitalWrite(LED2,HIGH);
+      dorequest();
+      digitalWrite(LED2,LOW);
+    }
   }
 }
 
-int WIFIcmd(const __FlashStringHelper *c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
-  long t;
+int WIFIcmd(const __FlashStringHelper *c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
   WIFI.println(c);
-  t=millis();
-  while(millis()-t<tmout){          //until timeout
-    while(WIFI.available()){
-      if(WIFI.find(r)){return 1;}   //response good
-    }    
-  }
-  return 0;       //response not found
+  return wiFiWaitForReply(reply, true, timeout);
 }
 
-int WIFIcmd(const char* c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
-  long t;
+int WIFIcmd(const char* c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
   WIFI.println(c);
-  t=millis();
-  while(millis()-t<tmout){          //until timeout
-    while(WIFI.available()){
-      if(WIFI.find(r)){return 1;}   //response good
-    }    
-  }
-  return 0;       //response not found
+  return wiFiWaitForReply(reply, true, timeout);
 }
 
 void WIFIpurge(){                         //empty serial buffer
-  while(WIFI.available()){WIFI.read();}
+  while(WIFI.available()){
+    WIFI.read();
+  }
 }
 
 void WIFIsenddata(char* d, int client){   //send data to client
-  WIFI.print(F("AT+CIPSEND="));           //send data
-  WIFI.print(client);                     //to client
-  WIFI.print(F(","));              
-  WIFI.println(strlen(d));                //data has length
-  delay(50);
-  WIFI.find(">");
+  wiFiSendStart(client, strlen(d));
   WIFI.print(d);                          //data
-  delay(100);
-  WIFI.find("SEND OK");
-  WIFIpurge();                            //clear incoming buffer
+  wiFiWaitForSendOkReply();
 }
 
+void WIFIsenddata(const __FlashStringHelper *d, int client){   //send data to client
+  wiFiSendStart(client, strlen_PF(d));
+  WIFI.print(d);                          //data
+  wiFiWaitForSendOkReply();
+}
+
+void wiFiSendStart(int client, int len){   //Start send data to WiFi
+  WIFI.print(F("AT+CIPSEND="));            //send data command
+  WIFI.print(client);                      //to client
+  WIFI.print(F(","));
+  WIFI.println(len);                       //data has length, needs to be same as string below
+  wiFiWaitForReadyToSend();                //Wait for the message that WiFi unit is ready for the data.
+}
+
+
+int wiFiWaitForReadyToSend(){
+  return wiFiWaitForReply(AT_READY_TO_SEND, false, 5000);
+}
+
+int wiFiWaitForOkReply(){
+  return wiFiWaitForReply(AT_REPLY_OK, true, 10000);
+}
+
+int wiFiWaitForSendOkReply(){
+  return wiFiWaitForReply(AT_REPLY_SEND_OK, true, 10000);
+}
+
+int wiFiWaitForReply(const __FlashStringHelper *replyStrF, bool purge, unsigned long timeout){
+  int len = strlen_PF(replyStrF) + 1;
+  char replyStr[len];
+  strcpy_PF(replyStr,replyStrF);
+
+  timeout+=millis();
+
+  while(millis()<timeout){          //until timeout
+    while(WIFI.available()){
+      if(WIFI.find(replyStr)){             //response good
+        if(purge) {
+          WIFIpurge();              //clear incoming buffer
+        }
+        return 1;
+      }
+    }
+  }
+
+  if(purge) {
+    WIFIpurge();                            //clear incoming buffer
+  }
+  return 0;       //response not found
+}
 
 int addtobuffer(char buf[], int bufsize, char str[]){      //add str to end of buf, limited by bufsize
   int p=0;
@@ -674,6 +878,7 @@ int addtobuffer(char buf[], int bufsize, char str){       //add char to end of b
   return 0;
 }
 
+/*
 int addtobuffer(char buf[], int bufsize, long n){      //add n as string to end of buf, limited by bufsize, longs will work with ints, uns ints, longs
   char str[15]="";                                     //temporary buffer for number
   if(n<0){str[0]='-';str[1]=0;n=-n;}                   //leading negative sign
@@ -698,7 +903,7 @@ int addtobuffer(char buf[], int bufsize, long n){      //add n as string to end 
   buf[p+k]=0;                                           //terminate array
   return p;                                             //number of characters added  
 }
-
+*/
 long usonicRead(int trigPin, int echoPin, long utimeout){ //utimeout is maximum time to wait for return in us
   long b;
 
@@ -727,6 +932,10 @@ void displayFreeMemory(const __FlashStringHelper *msg) {
   Serial.print(msg);
   Serial.print(F(")="));
   Serial.println(freeMemory()); 
+}
+
+void clearPktbuf(){
+  memset(pktbuf, 0, sizeof(pktbuf));
 }
 
 void dirList(const __FlashStringHelper *msg) {
@@ -803,7 +1012,7 @@ void getNtpTime() {
 
 void callNtpTimeServer(char* ipAddress) {
   sprintf_P(pktbuf, NTP_CONNECT_CMD, ipAddress);
-  int resp = WIFIcmd(pktbuf,ok,10000);                                               //reset
+  int resp = WIFIcmd( pktbuf, AT_REPLY_OK, 10000);                                               //reset
 //  int resp = WIFIcmd2(F("AT+CIPSTART=0,\"UDP\",\"129.250.35.250\",123"),ok,10000);                                               //reset
 
   if(!resp) {
@@ -877,7 +1086,7 @@ void callNtpTimeServer(char* ipAddress) {
 //  String myString = String((char *)pktbuf);
 //  Serial.println(myString);
 //  Serial.println(F("End"));
-  WIFIcmd(F("AT+CIPCLOSE=0"),ok,5000);                                               //reset
+  WIFIcmd(F("AT+CIPCLOSE=0"), AT_REPLY_OK, 5000);                                               //reset
 
   if(cnt < NTP_PACKET_SIZE) {
     ntpStatus=2;
@@ -943,3 +1152,31 @@ void callNtpTimeServer(char* ipAddress) {
   ntpStatus=0;
 }
 
+// searches for the string sfind in the string str
+// returns 1 if string found
+// returns 0 if string not found
+int strContains(char *str, char *sfind) {
+    int found = 0;
+    int index = 0;
+    int len;
+
+    len = strlen(str);
+    
+    if (strlen(sfind) > len) {
+        return 0;
+    }
+    while (index < len) {
+        if (str[index] == sfind[found]) {
+            found++;
+            if (strlen(sfind) == found) {
+                return 1;
+            }
+        }
+        else {
+            found = 0;
+        }
+        index++;
+    }
+
+    return 0;
+}
