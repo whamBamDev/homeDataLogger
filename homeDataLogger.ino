@@ -108,6 +108,12 @@ struct dht11Response_t {
 #define AT_CMD_WIFI_STATUS F("AT+CIPSTATUS")
 #define AT_CMD_FIRMWARE F("AT+GMR")
 #define AT_CMD_DISCONNECT F("AT+CWQAP")
+#define AT_CMD_STATION_IP F("AT+CWLIF")
+#define AT_CMD_AP_PASSIVE_SCAN F("AT+CWLAP=,,,1,,")
+#define AT_CMD_AP_STATUS F("AT+CWJAP_CUR?")
+#define AT_CMD_GET_SLEEP_MODE F("AT+SLEEP?")
+#define AT_CMD_GET_FREE_RAM F("AT+SYSRAM?")
+
 
 #define AT_REPLY_OK F("OK")
 #define AT_REPLY_SEND_OK F("SEND OK")
@@ -124,6 +130,9 @@ struct dht11Response_t {
 #define HTTPWIFI_STATUS_1 F("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h2>WIFI STATUS</h2><h4>Status</h4><br><samp>\r\n")
 #define HTTPWIFI_STATUS_2 F("</samp>\r\n")
 #define HTTPWIFI_STATUS_3 F("<br><h4>Firmware Version</h4><samp>\r\n")
+#define HTTPWIFI_STATUS_4 F("<br><h4>AP Station Status</h4><samp>\r\n")
+#define HTTPWIFI_STATUS_5 F("<br><h4>Sleep Mode</h4><samp>\r\n")
+#define HTTPWIFI_STATUS_6 F("<br><h4>ESP-13 Free RAM</h4><samp>\r\n")
 #define HTTP404 F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>")
 #define HTTPJSON F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
 #define HTTPTEXT F("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n")
@@ -323,11 +332,6 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
 }
 
-File openWifiLogFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
-  strcpy_PF(pktbuf, F("WIFI.LOG"));
-  return SD.open(pktbuf, FILE_WRITE);
-}
-
 void logWiFiStatusToCard(){
   unsigned long timestamp;
   DateTime now = rtc.now();                   //capture time
@@ -335,7 +339,8 @@ void logWiFiStatusToCard(){
   digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
   delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
   
-  File fhandle = openWifiLogFile();
+  strcpy_PF(pktbuf, F("WIFI.LOG"));
+  File fhandle = SD.open(pktbuf, FILE_WRITE);
   if(!fhandle){                     // Cannot open the file, raise an error.
     errorflash(6);
   }
@@ -353,6 +358,7 @@ void logWiFiStatusToCard(){
   sprintf_P(pktbuf, XML_INT, freeMemory());
   fhandle.println(pktbuf);
 
+  fhandle.println(F("IP Connection Status"));
   clearPktbuf();
 
   int len = strlen_PF(AT_REPLY_OK) + 1;
@@ -360,8 +366,23 @@ void logWiFiStatusToCard(){
   strcpy_PF(replyStr,AT_REPLY_OK);
 
   WIFI.println(AT_CMD_WIFI_STATUS);
+  logResponseToFile( fhandle, replyStr);
 
+  fhandle.println(F("AP Status"));
+  WIFI.println(AT_CMD_AP_STATUS);
+  logResponseToFile( fhandle, replyStr);
+
+  fhandle.println(F("AP Free RAM"));
+  WIFI.println(AT_CMD_GET_FREE_RAM);
+  logResponseToFile( fhandle, replyStr);
+
+  fhandle.close();                            //close file so data is saved
+  digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
+}
+
+void logResponseToFile( File fhandle, char *replyStr) {
   unsigned long timeout = 2000 + millis();
+  clearPktbuf();
   while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
     while(WIFI.available()){
       int c = WIFI.read();
@@ -375,9 +396,6 @@ void logWiFiStatusToCard(){
     }
   }
   WIFIpurge();              //clear incoming buffer
-
-  fhandle.close();                            //close file so data is saved
-  digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
 }
 
 void setupDHT11( int pin){                    //set pin to output, set high for idle state
@@ -629,41 +647,45 @@ void listPage(){                                     //for serving a page of dat
 void displayWiFiStatus() {
   WIFIsenddata(HTTPWIFI_STATUS_1, cxn);
 
-  clearPktbuf();
-
   int len = strlen_PF(AT_REPLY_OK) + 1;
   char replyStr[len];
   strcpy_PF(replyStr,AT_REPLY_OK);
 
-  len = strlen_PF(HTMLBR) + 1;
+  WIFI.println(AT_CMD_WIFI_STATUS);
+  logStatusWeb(replyStr);
+
+  WIFIpurge();              //clear incoming buffer
+  WIFIsenddata( pktbuf, cxn);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
+
+  WIFIsenddata( HTTPWIFI_STATUS_3, cxn);
+  WIFI.println(AT_CMD_FIRMWARE);
+  logStatusWeb(replyStr);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
+
+  WIFIsenddata( HTTPWIFI_STATUS_4, cxn);
+  WIFI.println(AT_CMD_AP_STATUS);
+  logStatusWeb(replyStr);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
+
+  WIFIsenddata( HTTPWIFI_STATUS_5, cxn);
+  WIFI.println(AT_CMD_GET_SLEEP_MODE);
+  logStatusWeb(replyStr);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
+
+  WIFIsenddata( HTTPWIFI_STATUS_6, cxn);
+  WIFI.println(AT_CMD_GET_FREE_RAM);
+  logStatusWeb(replyStr);
+  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
+}
+
+void logStatusWeb(const char* replyStr){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  int len = strlen_PF(HTMLBR) + 1;
   char htmlBr[len];
   strcpy_PF(htmlBr,HTMLBR);
 
-  WIFI.println(AT_CMD_WIFI_STATUS);
-
   unsigned long timeout = 2000 + millis();
-  while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
-    while(WIFI.available()){
-      int c = WIFI.read();
-      if(c != -1){             //response good
-        if(c== '\n') {
-          if( strlen(pktbuf) < (PKTSIZE - 5)){
-            addtobuffer(pktbuf,PKTSIZE,htmlBr);      //add to buffer
-          }
-        } else {
-          addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
-        }
-      }
-    }
-  }
-  WIFIpurge();              //clear incoming buffer
-  WIFIsenddata( pktbuf, cxn);
-  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
-  WIFIsenddata( HTTPWIFI_STATUS_3, cxn);
-
   clearPktbuf();
-  timeout = 2000 + millis();
-  WIFI.println(AT_CMD_FIRMWARE);
   while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
     while(WIFI.available()){
       int c = WIFI.read();
@@ -680,7 +702,6 @@ void displayWiFiStatus() {
   }
   WIFIpurge();              //clear incoming buffer
   WIFIsenddata( pktbuf, cxn);
-  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
 }
 
 void serve404(){                                   //for serving a 404 page. i.e. noting found
@@ -762,9 +783,10 @@ void wifiinit(){
   if( strlen_PF(SET_IP) > 0) {
     WIFIcmd(SET_IP,AT_REPLY_OK,5000);
   }
-  WIFIcmd(F("AT+CWMODE=3"),AT_REPLY_OK,2000);                              //station mode only
+  WIFIcmd(F("AT+CWMODE=1"),AT_REPLY_OK,2000);                              //station mode only
+//  WIFIcmd(F("AT+CWMODE=3"),AT_REPLY_OK,2000);                              //station mode only
   WIFIcmd(F("AT+CWHOSTNAME=\"donkey\""),AT_REPLY_OK,2000);                     //set the hostname
-  WIFIcmd(F("AT+MDNS=1,\"donkey\",\"iot\",80"),AT_REPLY_OK,2000);                     //set the hostname
+//  WIFIcmd(F("AT+MDNS=1,\"donkey\",\"iot\",80"),AT_REPLY_OK,2000);                     //set the hostname
 
   WIFIcmd(F("AT+CIPMUX=1"),AT_REPLY_OK,2000);                              //MUX on (needed for server)
   WIFIcmd(F("AT+CIPSERVER=1,80"),AT_REPLY_OK,2000);                        //server on
@@ -822,15 +844,15 @@ void wiFiSendStart(int client, int len){   //Start send data to WiFi
 
 
 int wiFiWaitForReadyToSend(){
-  return wiFiWaitForReply(AT_READY_TO_SEND, false, 5000);
+  return wiFiWaitForReply(AT_READY_TO_SEND, false, 3000);
 }
 
 int wiFiWaitForOkReply(){
-  return wiFiWaitForReply(AT_REPLY_OK, true, 10000);
+  return wiFiWaitForReply(AT_REPLY_OK, true, 5000);
 }
 
 int wiFiWaitForSendOkReply(){
-  return wiFiWaitForReply(AT_REPLY_SEND_OK, true, 10000);
+  return wiFiWaitForReply(AT_REPLY_SEND_OK, true, 2000);
 }
 
 int wiFiWaitForReply(const __FlashStringHelper *replyStrF, bool purge, unsigned long timeout){
