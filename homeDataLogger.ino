@@ -11,25 +11,6 @@
 #include <SPI.h>
 #include <SD.h>
 
-const char NTP_CONNECT_CMD[] PROGMEM = "AT+CIPSTART=0,\"UDP\",\"%s\",123";
-const char TIME_FORMAT[] PROGMEM = "%04d-%02d-%02d %02d:%02d:%02d";
-
-const char UTP0_HOST[] PROGMEM = "0.au.pool.ntp.org";
-const char UTP0_IP[] PROGMEM = "203.100.61.10";
-const char UTP1_HOST[] PROGMEM = "1.au.pool.ntp.org";
-const char UTP1_IP[] PROGMEM = "54.252.129.186";
-const char UTP2_HOST[] PROGMEM = "2.au.pool.ntp.org";
-const char UTP2_IP[] PROGMEM = "144.48.166.166";
-const char UTP3_HOST[] PROGMEM = "3.au.pool.ntp.org";
-const char UTP3_IP[] PROGMEM = "203.19.252.4";
-
-const char * const NTP_SERVERS[][2] PROGMEM = {
-  {UTP1_HOST, UTP1_IP},
-  {UTP0_HOST, UTP0_IP},
-  {UTP2_HOST, UTP2_IP},
-  {UTP3_HOST, UTP3_IP}
-};
-
 const char JSON_EXT[] PROGMEM = ".JS";
 const char FILENAME[] PROGMEM = "%04d%02d%02d.JS";
 const char XML_DATE[] PROGMEM = "%04d-%02d-%02d";
@@ -1037,7 +1018,7 @@ void checkwifi(){
           return;
         }
 
-        cxn = atoi(pktbuf[i])
+        cxn = atoi(pktbuf[i]);
         //WIFI.print(F("Cxn; "));
         //WIFI.println(cxn);
 
@@ -1045,7 +1026,7 @@ void checkwifi(){
         //conv = String();
          // Get the length of the message
         i++; // move past the comma ,
-        while(pktbuf[i] != 0 || pktbuf[i] != ',')) {
+        while(pktbuf[i] != 0 || pktbuf[i] != ',') {
           i++;
         }
         i++; // move past the comma ,
@@ -1053,7 +1034,7 @@ void checkwifi(){
           cxn = -1;
           return;
         }
-        messageLength = atoi(pktbuf[i])
+        messageLength = atoi(pktbuf[i]);
 
 /*
         while(isDigit(pktbuf[i])) {
@@ -1340,165 +1321,6 @@ void dirList(const __FlashStringHelper *msg) {
   root.close();
 }
 
-
-
-
-void getNtpTime() {
-  ntpStatus=0;     //to display status info of NTP calls on webpage
-  ntpLastLookupTime = rtc.now();
-  char ipAddress[SBUFSIZE]="";   //for GET request
-
-  int serverCount = sizeof NTP_SERVERS / sizeof NTP_SERVERS[0];
-  for( int i = 0; i < serverCount; i++) {
-    strcpy_P(ipAddress, (char*)pgm_read_word(&(NTP_SERVERS[i][1]))); 
-    callNtpTimeServer(ipAddress);
-    if(ntpStatus == 0) {
-      return;
-    }
-  }
-}
-
-void callNtpTimeServer(char* ipAddress) {
-  sprintf_P(pktbuf, NTP_CONNECT_CMD, ipAddress);
-  int resp = WIFIcmd( pktbuf, AT_REPLY_OK, 10000);                                               //reset
-//  int resp = WIFIcmd2(F("AT+CIPSTART=0,\"UDP\",\"129.250.35.250\",123"),ok,10000);                                               //reset
-
-  if(!resp) {
-    ntpStatus=1;
-    return;
-  }
-  int cxn=0;
-
-  const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-
-  memset(pktbuf, 0, NTP_PACKET_SIZE+1);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  pktbuf[0] = 0b11100011;   // LI, Version, Mode
-  pktbuf[1] = 0;     // Stratum, or type of clock
-  pktbuf[2] = 6;     // Polling Interval
-  pktbuf[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  pktbuf[12]  = 49;
-  pktbuf[13]  = 0x4E;
-  pktbuf[14]  = 49;
-  pktbuf[15]  = 52;  
-  
-  WIFI.print(F("AT+CIPSEND="));           //send data
-  WIFI.print(cxn);                     //to client
-  WIFI.print(F(","));              
-  WIFI.println(NTP_PACKET_SIZE);                //data has length
-  delay(50);
-  WIFI.find(">");
-  WIFI.write(pktbuf, NTP_PACKET_SIZE);                          //data
-  delay(100);
-  WIFI.find("SEND OK");
-
-  memset(pktbuf, 0, NTP_PACKET_SIZE+1);
-  int tcnt = 0;
-  int cnt = 0;
-  bool readData = false;
-
-  // Timeout in 5 seconds
-  int tmout = 5000;
-  int t=millis();
-  while(millis()-t<tmout && cnt < NTP_PACKET_SIZE){          //until timeout
-    while(WIFI.available()) {
-      int d=WIFI.read();
-      tcnt++;
-      if(readData) {
-         pktbuf[cnt] = d;
-         cnt++;
-      } else {
-        if(d == ':') {
-          //Serial.println("data found");
-          readData = true;
-        }
-      }
-    }
-  delay(500);
-  }
- 
-  Serial.print(F("bytes read "));
-  Serial.println( cnt);
-  Serial.print(F("tbytes read "));
-  Serial.println(tcnt);
-  Serial.print(pktbuf[40]);
-  Serial.print(F("  "));
-  Serial.print(pktbuf[41]);
-  Serial.print(F("  "));
-  Serial.print(pktbuf[42]);
-  Serial.print(F("  "));
-  Serial.println(pktbuf[43]);
-//  Serial.println( (char *) pktbuf);
-//  String myString = String((char *)pktbuf);
-//  Serial.println(myString);
-//  Serial.println(F("End"));
-  WIFIcmd(F("AT+CIPCLOSE=0"), AT_REPLY_OK, 5000);                                               //reset
-
-  if(cnt < NTP_PACKET_SIZE) {
-    ntpStatus=2;
-    return;
-  }
- 
-  unsigned long highWord = word(pktbuf[40], pktbuf[41]);
-  unsigned long lowWord = word(pktbuf[42], pktbuf[43]);
-  // combine the four bytes (two words) into a long integer
-  // this is NTP time (seconds since Jan 1 1900):
-  unsigned long secsSince1900 = highWord << 16 | lowWord;
-  Serial.print(F("Seconds since Jan 1 1900 = "));
-  Serial.println(secsSince1900);
-
-  DateTime now = rtc.now();                   //capture time
-
-  // now convert NTP time into everyday time:
-  Serial.print("Unix time = ");
-  // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
-  const unsigned long seventyYears = 2208988800UL;
-
-  const unsigned long tenHours = 36000UL;
-
-  // subtract seventy years:
-  unsigned long epoch = secsSince1900 - seventyYears;
-  // print Unix time:
-  Serial.println(epoch);
-
-  Serial.print(F("cloc             "));
-  sprintf_P(pktbuf, TIME_FORMAT, now.year(), now.month(), now.day(), now.hour(),now.minute(),now.second());
-  //Serial.println(now.unixtime());
-  Serial.println(pktbuf);
-  DateTime compileTime = DateTime(epoch);
-  Serial.print(F("ep unix          "));
-  sprintf_P(pktbuf, TIME_FORMAT, compileTime.year(), compileTime.month(), compileTime.day(), compileTime.hour(),compileTime.minute(),compileTime.second());
-     Serial.println(pktbuf);
-     //Serial.println(compileTime.unixtime());
-
-     compileTime = DateTime(secsSince1900);
-     Serial.print(F("since 1900 unix  "));
-     sprintf_P(pktbuf, TIME_FORMAT, compileTime.year(), compileTime.month(), compileTime.day(), compileTime.hour(),compileTime.minute(),compileTime.second());
-     Serial.println(pktbuf);
-     Serial.print(F("DateTime size = "));
-     Serial.println(sizeof(compileTime));
-
-     //Serial.println(compileTime.unixtime());
-
-     epoch+=tenHours;
-     compileTime = DateTime(epoch);
-    
-     Serial.print(F("ep unix adjusted "));
-     sprintf_P(pktbuf, TIME_FORMAT, compileTime.year(), compileTime.month(), compileTime.day(), compileTime.hour(),compileTime.minute(),compileTime.second());
-     Serial.println(pktbuf);
-    int year = compileTime.year();
-
-  if(year < 2017 || year > 2050) {
-    ntpStatus=3;
-    return;
-  }
-
-  Serial.print(F("updating time"));
-  rtc.adjust(compileTime);
-  ntpStatus=0;
-}
 
 // searches for the string sfind in the string str
 // returns 1 if string found
