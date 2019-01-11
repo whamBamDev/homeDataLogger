@@ -46,16 +46,16 @@ const char URL_API_OUTSIDE[] PROGMEM = "api/outside";
 
 const char INDEX_LINE[] PROGMEM = "<li><a href=\"%s\">Download %s</a></li>\n";
 
-#define TEN_HOURS_IN_SECONDS (10 * 60 * 60)
-
 #define JSON_START F("[\r\n")
 #define JSON_END F("\r\n]")
 #define JSON_NULL F("null")
 #define COMMA F(",")
 
 // Every 10 minutes.
-#define LOGINTERVAL (10L * 60L * 1000L)
-#define WIFILOGINTERVAL (30L * 60L * 1000L)
+#define LOG_INTERVAL (10L * 60L * 1000L)
+#define WIFI_LOG_INTERVAL (60L * 60L * 1000L)
+#define WIFI_RESET_INTERVAL (24L * 60L * 60L * 1000L)
+
 
 
 #define LIGHTPIN A0
@@ -77,6 +77,7 @@ RTC_DS1307 rtc;
 #define LED2 3
 long sampleTime;      //keeps track of logging interval
 long wifiLogTime;      //keeps track of logging interval
+long wifiResetTime;      //keeps track of logging interval
 int status=0;         //to display status info on webpage
 unsigned long lastSampleTimeUnix = 0;
 
@@ -103,6 +104,9 @@ struct dht11Response_t {
 #define US_TIMEOUT_2_5M 14500  // Timeout for 2.5m
 
 #define WIFI Serial
+#define WIFI_DEBUG 1
+
+#define AT_CMD_RECV F("+IPD,")
 #define AT_CMD_SEND F("AT+CIPSEND=")
 #define AT_CMD_CLOSE F("AT+CIPCLOSE=")
 #define AT_CMD_WIFI_STATUS F("AT+CIPSTATUS")
@@ -110,15 +114,28 @@ struct dht11Response_t {
 #define AT_CMD_DISCONNECT F("AT+CWQAP")
 #define AT_CMD_STATION_IP F("AT+CWLIF")
 #define AT_CMD_AP_PASSIVE_SCAN F("AT+CWLAP=,,,1,,")
+#define AT_CMD_PING_AP F("AT+PING=\"192.168.0.1\"")
 #define AT_CMD_AP_STATUS F("AT+CWJAP_CUR?")
 #define AT_CMD_GET_SLEEP_MODE F("AT+SLEEP?")
 #define AT_CMD_GET_FREE_RAM F("AT+SYSRAM?")
 
+#define AT_CMD_GET_RECEIVE_MODE F("AT+CIPRECVMODE?")
+#define AT_CMD_GET_STATION_LIST_MODE F("AT+CWLIF")
+
+#define AT_CMD_GET_MODE_CFG_FLASH F("AT+CWMODE_DEF?")
+#define AT_CMD_SET_MODE_STATION_FLASH F("AT+CWMODE_DEF=1")
+#define AT_CMD_SET_MODE_SOFT_AP_STATION_FLASH F("AT+CWMODE_DEF=3")
+
+
+#define AT_CMD_GET_IP_CFG_FLASH F("AT+CIPSTA_DEF?")
+#define AT_CMD_GET_AP_CFG_FLASH F("AT+CWJAP_DEF?")
+#define AT_CMD_SET_AUTO_CONN_FLASH F("AT+CWAUTOCONN=1")
 
 #define AT_REPLY_OK F("OK")
+#define AT_REPLY_ERROR F("ERROR")
 #define AT_REPLY_SEND_OK F("SEND OK")
 #define AT_REPLY_READY F("ready")
-#define AT_REPLY_GOT_IP F("WIFI GOT IP")
+//#define AT_REPLY_GOT_IP F("WIFI GOT IP")
 #define AT_READY_TO_SEND F(">")
 
 //#define AT_READY_TO_SEND F("STATUS:4")
@@ -131,7 +148,7 @@ struct dht11Response_t {
 #define HTTPWIFI_STATUS_2 F("</samp>\r\n")
 #define HTTPWIFI_STATUS_3 F("<br><h4>Firmware Version</h4><samp>\r\n")
 #define HTTPWIFI_STATUS_4 F("<br><h4>AP Station Status</h4><samp>\r\n")
-#define HTTPWIFI_STATUS_5 F("<br><h4>Sleep Mode</h4><samp>\r\n")
+//#define HTTPWIFI_STATUS_5 F("<br><h4>Sleep Mode</h4><samp>\r\n")
 #define HTTPWIFI_STATUS_6 F("<br><h4>ESP-13 Free RAM</h4><samp>\r\n")
 #define HTTP404 F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html>\r\n<html><body>\r\n<h3>File not found</h3><br><a href=\"index.htm\">Back to index...</a><br></body></html>")
 #define HTTPJSON F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
@@ -157,6 +174,7 @@ const char LOG_MSG_TEMP_VALUE[] PROGMEM = "Analog temp%d = %d, ";
 char fname[SBUFSIZE]="";    //filename
 char currentFilename[SBUFSIZE]="";    //filename
 int cxn=-1;                 //connection number
+int deadCxn=-1;                 //connection number
 char pktbuf[PKTSIZE]="";    //to consolidate data for sending
 
 
@@ -166,7 +184,6 @@ void setup() {
   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
   usonicSetup(USONIC_2_TRIG, USONIC_2_ECHO); //set up ultrasonic sensor
 
-  wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
   setupDHT11(DHT11PIN);           //start temp/humidity sensor
 
   //getNtpTime();
@@ -180,6 +197,9 @@ void setup() {
   if (!rtc.begin()) {           // rtc not responding
     errorflash(2);              //flash error code for RTC not found
   }
+  digitalWrite(LED2,LOW);      //turn on LED to show card in use
+
+  wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
 
   //WIFI.print(F("Compile time = "));
   //WIFI.print(F(__DATE__));
@@ -190,7 +210,6 @@ void setup() {
   DateTime now = rtc.now();
   // The 90*60 is a bit of a half arsed attempt to not set the date during summer DST
   if( compileTime.secondstime() > (now.secondstime() + (90*60))) {
-    WIFI.println(F("--- 2"));
     // following line sets the RTC to the date & time this sketch was compiled
     rtc.adjust(compileTime);
   }
@@ -207,6 +226,7 @@ void setup() {
 
   sampleTime = millis() + 10000;   //Wait for 10 seconds before the first sample.
   wifiLogTime = millis() + 10000;
+  wifiResetTime = millis() + WIFI_RESET_INTERVAL;
 }
 
 void loop() {
@@ -233,13 +253,18 @@ void loop() {
     logtocard(temperatureA, temperatureB, temperatureC, temperatureD, distanceA, distanceB, dht11Response, light);          //log it
 
 //    sampleTime+=(LOGINTERVAL*10L);        //add interval, so interval is precise
-    sampleTime+=LOGINTERVAL;        //add interval, so interval is precise
+    sampleTime+=LOG_INTERVAL;        //add interval, so interval is precise
   }
   checkwifi();  
 
   if(millis()>wifiLogTime){   //if it's been more than logging interval
     logWiFiStatusToCard();
-    wifiLogTime += WIFILOGINTERVAL;
+    wifiLogTime += WIFI_LOG_INTERVAL;
+  }
+
+  if(millis()>wifiResetTime){   //if it's been more than logging interval
+    wifiResetServer();
+    wifiResetTime += WIFI_RESET_INTERVAL;
   }
 }
 
@@ -332,6 +357,41 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
 }
 
+void debugWiFi( int c){
+  #if WIFI_DEBUG
+    File auditFile = debugWiFiOpenFile();
+    auditFile.write(c);
+    auditFile.close();                         //close file so data is saved
+  #endif
+}
+
+void debugWiFi(const char *message){
+  #if WIFI_DEBUG
+    File auditFile = debugWiFiOpenFile();
+    auditFile.write(message);
+    auditFile.write('\n');
+    auditFile.close();                         //close file so data is saved
+  #endif
+}
+
+void debugWiFi(const __FlashStringHelper *messageF){
+  #if WIFI_DEBUG
+    File auditFile = debugWiFiOpenFile();
+    char message[strlen_PF(messageF) + 1];
+    strcpy_PF( message, messageF);
+    auditFile.write(message);
+    auditFile.write('\n');
+    auditFile.close();                         //close file so data is saved
+  #endif
+}
+
+File debugWiFiOpenFile(){
+  int i = strlen_PF(F("WIFI.AUD"));
+  char filename[i + 1];
+  strcpy_PF( filename, F("WIFI.AUD"));
+  return SD.open( filename, FILE_WRITE);
+}
+
 void logWiFiStatusToCard(){
   unsigned long timestamp;
   DateTime now = rtc.now();                   //capture time
@@ -348,7 +408,7 @@ void logWiFiStatusToCard(){
   unsigned long s;
     
   // Timestamp format ISO 8601: 2017-12-26T07:44:19+10
-  fhandle.print(F("\r\n==================================================\r\n== Status Time: "));
+  fhandle.print(F("\r\n================\r\n== Status Time: "));
   sprintf_P(pktbuf, XML_DATE, now.year(), now.month(), now.day());
   fhandle.print(pktbuf);
   fhandle.print(F("T"));
@@ -369,19 +429,33 @@ void logWiFiStatusToCard(){
   logResponseToFile( fhandle, replyStr);
 
   fhandle.println(F("AP Status"));
-  WIFI.println(AT_CMD_AP_STATUS);
+  WIFI.println(AT_CMD_GET_AP_CFG_FLASH);
+//  WIFI.println(AT_CMD_AP_STATUS);
   logResponseToFile( fhandle, replyStr);
-
+/*
   fhandle.println(F("AP Free RAM"));
   WIFI.println(AT_CMD_GET_FREE_RAM);
   logResponseToFile( fhandle, replyStr);
 
+  fhandle.println(F("Ping AP"));
+  WIFI.println(AT_CMD_PING_AP);
+  logResponseToFile( fhandle, replyStr);
+
+  fhandle.println(F("List APs"));
+  WIFI.println(AT_CMD_AP_PASSIVE_SCAN);
+  logResponseToFile( fhandle, replyStr);
+*/
+/*
+  fhandle.println(F("Station List"));
+  WIFI.println(AT_CMD_GET_STATION_LIST_MODE);
+  logResponseToFile( fhandle, replyStr);
+*/
   fhandle.close();                            //close file so data is saved
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
 }
 
 void logResponseToFile( File fhandle, char *replyStr) {
-  unsigned long timeout = 2000 + millis();
+  unsigned long timeout = 10000 + millis();
   clearPktbuf();
   while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
     while(WIFI.available()){
@@ -472,38 +546,65 @@ void usonicSetup(int trigPin, int echoPin){
 }
 
 
-void dorequest(){
+void dorequest(int messageLength){
   unsigned long t;                     //timeout
   int p=0;                             //pointer to getreq position
   int f=1;                             //flag to tell if first line or not
   int crcount=0;                       //if we get two CR/LF in a row, request is complete
+  char lengthStr[10];
+
   clearPktbuf();
-  
-  pktbuf[0]=0;                         //clear string  
-  t=millis()+1000;                     //wait up to a second for data, shouldn't take more than 125ms for 1460 byte MTU
-  while((millis()<t)&&(crcount<2)){    //drop out if <CR><LF><CR><LF> seen or timeout
+  t=millis()+5000;                     //wait up to a second for data, shouldn't take more than 125ms for 1460 byte MTU
+  while( millis() < t && crcount == 0 && messageLength > 0){    //drop out if <CR><LF> seen or timeout
     if(WIFI.available()){
-      int d;
-      d=WIFI.read();
-      if(d>31){                        //if an ASCII character
-        crcount=0;                     //clear CR count
+      int d=WIFI.read();
+      debugWiFi(d);
+
+      messageLength--;
+//  sprintf(lengthStr, "\nrd %d %c\n", messageLength,d);
+//  debugWiFi(lengthStr);
+
         if(f==1){                      //on first line
           if(p < sizeof(pktbuf)) {
             pktbuf[p]=d;               //add to GET buffer, but do not overrun the buffer.
             p++;
           }
         }
-      }
-      if(d==13){                       //if CR found increase CR count
+      if(d=='\r'){                       //if CR found increase CR count
+        debugWiFi(F("CR..."));
+        sprintf(lengthStr, "%d\n", messageLength);
+        debugWiFi(lengthStr);
+  debugWiFi(F("cr req ln; "));
+  debugWiFi(pktbuf);
         crcount++;
         f++;
       }      
+    } else {
+        delay(100);
     }
   }
+  debugWiFi('\n');
+  debugWiFi(F("req ln; "));
+  debugWiFi(pktbuf);
+//  sprintf(lengthStr, "\nrem %d\n", messageLength);
+//  debugWiFi(lengthStr);
+
+  while(WIFI.available() && messageLength > 0){    //drop out if <CR><LF> seen or timeout
+    debugWiFi(WIFI.read());
+    messageLength--;
+  }
+
   fname[0]=0;                                              //blank
-  
-  if( strncmp_P(pktbuf, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) != 0){crcount=0;}   //no 'GET ' at the start, so change flag to cancel
-  if(crcount==2){parseFileName(pktbuf);}                                                       //complete request found, extract name of requested file
+
+  if( strncmp_P(pktbuf, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) == 0) {
+    //If 'GET ' at the start, so change flag to0
+    crcount=1;
+    parseFileName(pktbuf);                                                       //complete request found, extract name of requested file
+  }   
+  debugWiFi(F("fname; "));
+  debugWiFi(fname);
+  debugWiFi(F("crcount; "));
+  debugWiFi(crcount + '0');
   if(fname[0]==0 || strcmp_P(fname,URL_FILE_INDEX_1) == 0 || strcmp_P(fname,URL_FILE_INDEX_2) == 0){
     servePage();
     sendStatus();
@@ -660,16 +761,10 @@ void displayWiFiStatus() {
 
   WIFIsenddata( HTTPWIFI_STATUS_3, cxn);
   WIFI.println(AT_CMD_FIRMWARE);
-  logStatusWeb(replyStr);
   WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
 
   WIFIsenddata( HTTPWIFI_STATUS_4, cxn);
   WIFI.println(AT_CMD_AP_STATUS);
-  logStatusWeb(replyStr);
-  WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
-
-  WIFIsenddata( HTTPWIFI_STATUS_5, cxn);
-  WIFI.println(AT_CMD_GET_SLEEP_MODE);
   logStatusWeb(replyStr);
   WIFIsenddata( HTTPWIFI_STATUS_2, cxn);
 
@@ -775,50 +870,317 @@ void getOutsideClimate(){                      //Returns JSON with the current t
 
 
 void wifiinit(){
-  WIFIcmd(F("AT+RST"), AT_REPLY_READY, 5000);                    //reset
-  WIFIcmd(F("AT+CWQAP"), AT_REPLY_OK, 5000);                     //exit any AP's
+ WIFIcmd(F("ATE0"),AT_REPLY_OK,1000);                                     //turn echo off
 
-  WIFIcmd(WIFI_SSID, AT_REPLY_GOT_IP, 10000);                    //join AP
-  WIFIcmd(F("ATE0"),AT_REPLY_OK,1000);                                     //turn echo off
-  if( strlen_PF(SET_IP) > 0) {
-    WIFIcmd(SET_IP,AT_REPLY_OK,5000);
+  delay(1000);
+
+  if( !checkWifiConfig(AT_CMD_GET_MODE_CFG_FLASH, F("CWMODE_DEF:3"), AT_REPLY_OK)) {
+    WIFIcmd(AT_CMD_SET_MODE_SOFT_AP_STATION_FLASH, AT_REPLY_OK, 1000);                     //Set the default to a station
+    //WIFIcmd(AT_CMD_SET_MODE_STATION_FLASH, AT_REPLY_OK, 1000);                     //Set the default to a station
   }
-  WIFIcmd(F("AT+CWMODE=1"),AT_REPLY_OK,2000);                              //station mode only
-//  WIFIcmd(F("AT+CWMODE=3"),AT_REPLY_OK,2000);                              //station mode only
-  WIFIcmd(F("AT+CWHOSTNAME=\"donkey\""),AT_REPLY_OK,2000);                     //set the hostname
-//  WIFIcmd(F("AT+MDNS=1,\"donkey\",\"iot\",80"),AT_REPLY_OK,2000);                     //set the hostname
 
+  // Set default ip address
+  if( !checkWifiConfig(AT_CMD_GET_IP_CFG_FLASH, WIFI_IP, AT_REPLY_OK)) {
+    WIFIcmd(AT_CMD_SET_IP, AT_REPLY_OK, 1000);
+  }
+
+  bool apSet = false;
+  for( int cnt = 0; cnt < 5 && ! apSet; cnt++) {
+    if( checkWifiConfig(AT_CMD_GET_AP_CFG_FLASH, WIFI_SSID, AT_REPLY_OK)) {
+    ///WIFI.println("OK-");
+      apSet = true;
+    } else {
+    //WIFI.println("FAIL-");
+      delay(1000);
+    }
+  }
+  if( !apSet) {
+    WIFIcmd(F("AT+CWQAP"), AT_REPLY_OK, 5000);                     //exit any AP's
+    WIFIcmd(AT_CMD_SET_AUTO_CONN_FLASH, AT_REPLY_OK, 1000);        //Set autoconnect
+    WIFIcmd(AT_CMD_SET_WIFI_SSID, AT_REPLY_OK, 10000);         //Set the default to a station
+
+    WIFIcmd(F("AT+RST"), AT_REPLY_READY, 10000);                   //reset
+    delay(5000);
+  }
+
+  wifiConfigServer();
+}
+
+void wifiResetServer() {
+  WIFIcmd(F("AT+RST"), AT_REPLY_READY, 10000);
+  delay(10000);
+  wifiConfigServer();
+}
+
+void wifiConfigServer() {
   WIFIcmd(F("AT+CIPMUX=1"),AT_REPLY_OK,2000);                              //MUX on (needed for server)
+  WIFIcmd(F("AT+CIPSERVERMAXCONN=2"),AT_REPLY_OK,2000);                    //Set the maximum number of connections.
   WIFIcmd(F("AT+CIPSERVER=1,80"),AT_REPLY_OK,2000);                        //server on
-  WIFIcmd(F("AT+CIPSTO=10"),AT_REPLY_OK,2000);                             //disconnect after x time if no data
+  WIFIcmd(F("AT+CIPSTO=60"),AT_REPLY_OK,2000);                             //disconnect after x time if no data
+}
+
+bool checkWifiConfig(const __FlashStringHelper *commandF, const __FlashStringHelper *successStrF, const __FlashStringHelper *endResponseF){
+
+  WIFI.println(commandF);
+
+  char endResponse[strlen_PF(endResponseF) + 1];
+  strcpy_PF(endResponse,endResponseF);
+
+  char successStr[strlen_PF(successStrF) + 1];
+  strcpy_PF(successStr,successStrF);
+
+  unsigned long timeout = millis() + 2000;
+  clearPktbuf();
+  while(millis() < timeout && !strContains(pktbuf, endResponse)){          //until timeout
+    while(WIFI.available()){
+      int c = WIFI.read();
+      if(c != -1){             //response good
+        debugWiFi(c);
+        if(c== '\n') {
+//          WIFI.print(F("resp- "));
+//          WIFI.println(pktbuf);
+          if( strContains(pktbuf, successStr)) {
+            WIFIpurge();
+            return true;
+          }
+          clearPktbuf();
+        } else {
+          addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+bool checkWifiConfigEcho(const __FlashStringHelper *commandF, const __FlashStringHelper *successStrF, const __FlashStringHelper *endResponseF){
+
+  WIFI.println(commandF);
+
+  char endResponse[strlen_PF(endResponseF) + 1];
+  strcpy_PF(endResponse,endResponseF);
+
+  char successStr[strlen_PF(successStrF) + 1];
+  strcpy_PF(successStr,successStrF);
+
+  unsigned long timeout = millis() + 2000;
+  clearPktbuf();
+  while(millis() < timeout && !strContains(pktbuf, endResponse)){          //until timeout
+    while(WIFI.available()){
+      int c = WIFI.read();
+      if(c != -1){             //response good
+        debugWiFi(c);
+        if(c== '\n') {
+          WIFI.print(F("resp- "));
+          WIFI.println(pktbuf);
+          if( strContains(pktbuf, successStr)) {
+            WIFIpurge();
+            return true;
+          }
+          clearPktbuf();
+        } else {
+          addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
+        }
+      }
+    }
+  }
+  WIFIpurge();
+
+  return false;
 }
 
 void checkwifi(){
+  clearPktbuf();
+  int messageLength = -1;
+  unsigned long timeout = millis() + 100;
+
+  while(WIFI.available()
+     || (strlen( pktbuf) > 0 && timeout < millis())){                    //check if any data from WIFI
+    int b = WIFI.read();
+    debugWiFi(b);
+
+    if(b == '\n') {
+      clearPktbuf();
+      return;
+    }
+
+    addtobuffer(pktbuf,PKTSIZE,b);      //add to buffer
+    //WIFI.print(F("xxx; "));
+    //WIFI.println(pktbuf);
+
+    if(b == ':') {
+      
+      char recvCmd[strlen_PF(AT_CMD_RECV) + 1];
+      strcpy_PF(recvCmd,AT_CMD_RECV);
+      if(strContains(pktbuf, recvCmd)) {
+        // Just received data command: +IPD,0,n:    
+        int i = strlen(recvCmd);         
+        //String conv = String();
+        
+        // Get the link id.
+        /*
+        cxn=-1;
+        while(isDigit(pktbuf[i])) {
+          conv += pktbuf[i];
+          i++;
+        }
+
+        if( conv.length() == 0) {
+          return;
+        }
+        
+        cxn = conv.toInt();
+        */
+        if( !isDigit(pktbuf[i])) {
+          cxn = -1;
+          return;
+        }
+
+        cxn = atoi(pktbuf[i])
+        //WIFI.print(F("Cxn; "));
+        //WIFI.println(cxn);
+
+        
+        //conv = String();
+         // Get the length of the message
+        i++; // move past the comma ,
+        while(pktbuf[i] != 0 || pktbuf[i] != ',')) {
+          i++;
+        }
+        i++; // move past the comma ,
+        if( !isDigit(pktbuf[i])) {
+          cxn = -1;
+          return;
+        }
+        messageLength = atoi(pktbuf[i])
+
+/*
+        while(isDigit(pktbuf[i])) {
+          conv += pktbuf[i];
+          i++;
+        }
+        if( conv.length() == 0) {
+          cxn=-1;
+          return;
+        }
+        messageLength = conv.toInt();
+        */
+        //WIFI.print(F("messageLength; "));
+        //WIFI.println(messageLength);
+
+        // Read all the data
+        digitalWrite(LED2,HIGH);
+        dorequest(messageLength);
+        digitalWrite(LED2,LOW);
+      }   
+    }
+  }
+}
+
+bool readLine(unsigned long timeoutTime){
+  clearPktbuf();
+  int messageLength = -1;
+
+  while(timeoutTime < millis()){                    //check if any data from WIFI
+    while(WIFI.available()){                        //check if any data from WIFI
+      int b = WIFI.read(); 
+
+      if(b == '\n') {
+//  WIFI.print(F("rl;"));
+//  WIFI.println(pktbuf);
+        return true;
+      } else if( b != '\r') {
+        addtobuffer(pktbuf,PKTSIZE,b);      //add to buffer
+      }
+
+      if(b == ':') {
+// WIFI.println(F("col..."));
+        char recvCmd[strlen_PF(AT_CMD_RECV) + 1];
+        strcpy_PF(recvCmd,AT_CMD_RECV);
+        if(strContains(pktbuf, recvCmd)) {
+          // Just received data command: +IPD,0,n:    
+          int i = strlen(recvCmd);         
+          String conv = String();
+        
+          // Get the link id.
+          int linkId=-1;
+          while(isDigit(pktbuf[i])) {
+            conv += pktbuf[i];
+            i++;
+          }
+
+          if( conv.length() == 0) {
+            break;
+          }
+          deadCxn = conv.toInt();
+
+          conv = String();
+          // Get the length of the message
+          i++; // move past the comma ,
+          while(isDigit(pktbuf[i])) {
+            conv += pktbuf[i];
+            i++;
+          }
+          if( conv.length() == 0) {
+            cxn=-1;
+            return false;
+          }
+          messageLength = conv.toInt();
+          WIFIpurge(messageLength);                         //empty serial buffer
+          clearPktbuf();
+        }   
+      }   
+    }
+  }
+
+  return false;
+}
+
+
+void checkwifi_orig(){
   while(WIFI.available()){                    //check if any data from WIFI
     int d;
     d=WIFI.read();
     if((d>47)&&(d<58)&&(cxn<0)){cxn=d-48;}    //connection number, could come from IPD or CONNECT
     if(d==':'){                  //: means end of IPD data, content follows. LED on while busy
       digitalWrite(LED2,HIGH);
-      dorequest();
+//      dorequest();
       digitalWrite(LED2,LOW);
     }
   }
 }
 
 int WIFIcmd(const __FlashStringHelper *c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  debugWiFi(c);
   WIFI.println(c);
-  return wiFiWaitForReply(reply, true, timeout);
+  return wiFiWaitForReply2(reply, timeout);
+//  return wiFiWaitForReply(reply, true, timeout);
 }
 
 int WIFIcmd(const char* c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  debugWiFi(c);
   WIFI.println(c);
-  return wiFiWaitForReply(reply, true, timeout);
+  return wiFiWaitForReply2(reply, timeout);
+//  return wiFiWaitForReply(reply, true, timeout);
 }
 
 void WIFIpurge(){                         //empty serial buffer
   while(WIFI.available()){
-    WIFI.read();
+    int b = WIFI.read();
+    debugWiFi(b);
+  }
+}
+
+void WIFIpurge(int length ){                         //empty serial buffer
+  unsigned long timeout = millis() + 1000;
+  
+  while(length > 0 && timeout > millis()){
+    int b = WIFI.read();
+    if( b >= 0) {
+      debugWiFi(b);
+      length--;
+    }
   }
 }
 
@@ -848,7 +1210,7 @@ int wiFiWaitForReadyToSend(){
 }
 
 int wiFiWaitForOkReply(){
-  return wiFiWaitForReply(AT_REPLY_OK, true, 5000);
+  return wiFiWaitForReply2(AT_REPLY_OK, 5000);
 }
 
 int wiFiWaitForSendOkReply(){
@@ -879,6 +1241,25 @@ int wiFiWaitForReply(const __FlashStringHelper *replyStrF, bool purge, unsigned 
   return 0;       //response not found
 }
 
+int wiFiWaitForReply2(const __FlashStringHelper *replyStrF, unsigned long timeout){
+  int len = strlen_PF(replyStrF) + 1;
+  char replyStr[len];
+  strcpy_PF(replyStr,replyStrF);
+
+  char errorStr[len];
+  strcpy_PF(replyStr,replyStrF);
+
+  timeout+=millis();
+
+  while(readLine(timeout)){
+    if(strContains(pktbuf, replyStr)) {
+      return 1;
+    }
+  }
+
+  return 0;       //response not found
+}
+
 int addtobuffer(char buf[], int bufsize, char str[]){      //add str to end of buf, limited by bufsize
   int p=0;
   int k=strlen(buf);
@@ -900,32 +1281,7 @@ int addtobuffer(char buf[], int bufsize, char str){       //add char to end of b
   return 0;
 }
 
-/*
-int addtobuffer(char buf[], int bufsize, long n){      //add n as string to end of buf, limited by bufsize, longs will work with ints, uns ints, longs
-  char str[15]="";                                     //temporary buffer for number
-  if(n<0){str[0]='-';str[1]=0;n=-n;}                   //leading negative sign
-  int lzero=0;
-  long d=1000000000L;                                  //decade divider
-  long j;
-  while(d>0){                                          //for all digits
-    j=(n/d)%10;                                        //find digit
-    if(j){lzero=1;}                                    //non zero character found
-    if(lzero||(d==1)){                                 //always show units and any after non-zero
-      str[strlen(str)+1]=0;
-      str[strlen(str)]=j+'0';                          //add a digit
-    }
-    d=d/10;                                            //next one
-  }
-  int p=0;
-  int k=strlen(buf);
-  while((k+p<bufsize-1)&&str[p]){
-    buf[p+k]=str[p];
-    p++;
-  }
-  buf[p+k]=0;                                           //terminate array
-  return p;                                             //number of characters added  
-}
-*/
+
 long usonicRead(int trigPin, int echoPin, long utimeout){ //utimeout is maximum time to wait for return in us
   long b;
 
@@ -986,36 +1342,6 @@ void dirList(const __FlashStringHelper *msg) {
 
 
 
-int WIFIcmd2(const __FlashStringHelper *c,char* r,long tmout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
-  long t;
-  WIFI.println(c);
-//  Serial.println("");
-  const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-  byte packetBuffer[ NTP_PACKET_SIZE+1]; 
-  memset(packetBuffer, 0, NTP_PACKET_SIZE+1);
-
-  int cnt=0;
-  t=millis();
-  while(millis()-t<tmout){          //until timeout
-    while(WIFI.available()){
-//      int d;
-      
-//      d=WIFI.read();
-//  Serial.print(d);
-//      if(cnt < NTP_PACKET_SIZE) packetBuffer[cnt++] = d;
-//    Serial.print(cnt);
-//    Serial.print(": ");
-//    Serial.print( d);
-
-      
-      if(WIFI.find(r)){return 1;}   //response good
-    }    
-  }
-
-//  String myString = String((char *)packetBuffer);
-//  Serial.println(myString);
-return 0;       //response not found
-}
 
 void getNtpTime() {
   ntpStatus=0;     //to display status info of NTP calls on webpage
