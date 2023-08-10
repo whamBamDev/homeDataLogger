@@ -2,6 +2,9 @@
 //WIFI webserver to dynamically download data
 
 #include "WifiSettings.h"
+#include "utils.h"
+#include "ioMux.h"
+#include "sensors.h"
 #include <avr/pgmspace.h>
 #include <MemoryFree.h>
 
@@ -66,18 +69,13 @@ unsigned long lastSampleTimeUnix = 0;
 //for DHT11 interface
 //#define DHT11PIN 8
 #define DHT11PIN 2
-struct dht11Response_t {
-  int status;
-  int temperature;
-  int humidity;
-} ;
 
 
 // UltraSonic module
-#define USONIC_1_TRIG 7
-#define USONIC_1_ECHO 6
-#define USONIC_2_TRIG 9
-#define USONIC_2_ECHO 8
+#define USONIC_1_TRIG D_X
+#define USONIC_1_ECHO D_Y
+#define USONIC_2_TRIG D_X
+#define USONIC_2_ECHO D_Y
 #define USMAX 3000  //??
 #define USTIMEOUT_2M   11600  // Timeout for 2m
 #define US_TIMEOUT_2_5M 14500  // Timeout for 2.5m
@@ -105,7 +103,7 @@ struct dht11Response_t {
 #define AT_CMD_SET_MODE_STATION_FLASH F("AT+CWMODE_DEF=1")
 #define AT_CMD_SET_MODE_SOFT_AP_STATION_FLASH F("AT+CWMODE_DEF=3")
 
-
+#define AT_CMD_GET_IP_CFG F("AT+CIPSTA_CUR?")
 #define AT_CMD_GET_IP_CFG_FLASH F("AT+CIPSTA_DEF?")
 #define AT_CMD_GET_AP_CFG_FLASH F("AT+CWJAP_DEF?")
 #define AT_CMD_SET_AUTO_CONN_FLASH F("AT+CWAUTOCONN=1")
@@ -155,11 +153,18 @@ char pktbuf[PKTSIZE]="";    //to consolidate data for sending
 
 void setup() {
   WIFI.begin(115200);   //start serial port for WIFI
-
+/*
+  selectDigitalDevice(0);
   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
+
+  selectDigitalDevice(1);
   usonicSetup(USONIC_2_TRIG, USONIC_2_ECHO); //set up ultrasonic sensor
 
   setupDHT11(DHT11PIN);           //start temp/humidity sensor
+*/
+  pinMode(D_A, OUTPUT);
+  pinMode(D_B, OUTPUT);
+  pinMode(D_DISABLE, OUTPUT);
 
   pinMode(LED2,OUTPUT);
   digitalWrite(LED2,HIGH);      //turn on LED to show card in use
@@ -174,11 +179,6 @@ void setup() {
 
   wifiinit();           //send starting settings- find AP, connect and set to station mode only, start server
 
-  //WIFI.print(F("Compile time = "));
-  //WIFI.print(F(__DATE__));
-  //WIFI.print(F(" "));
-  //WIFI.println(F(__TIME__));
-  // Use the compile date/time
   DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
   DateTime now = rtc.now();
   // The 90*60 is a bit of a half arsed attempt to not set the date during summer DST
@@ -190,7 +190,7 @@ void setup() {
   if (!rtc.isrunning()) {       //rtc not running- use ds1307 example to load current time
     errorflash(3);              //flash error code for RTC not running
   }
-  
+
   File fhandle = openDataFile();
   if( ! fhandle) {
     errorflash(4);              //flash error code for RTC not running
@@ -203,17 +203,35 @@ void setup() {
 }
 
 void loop() {
+
   if(millis()>sampleTime){   //if it's been more than logging interval
-    dht11Response_t dht11Response = readDHT11(DHT11PIN);     //fetch data to log
+
+   setupDHT11(D_Y);           //start temp/humidity sensor
+   selectDigitalDevice(2);
+   dht11Response_t dht11Response = readDHT11(D_Y);     //fetch data to log
+
+   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
+   selectDigitalDevice(0);
+   delay(100);
+
     int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
+
+   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
+   selectDigitalDevice(1);
+   delay(100);
+    
     int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M); //distance in cm, time out at 11600us or 2m maximum range
 
     int light = -1;
     //light=analogRead(LIGHTPIN);     //get light sensor data
-    float temperatureA = readThermister(TEMP_A_PIN);
-    float temperatureB = readThermister(TEMP_B_PIN);
-    float temperatureC = readThermister(TEMP_C_PIN);
-    float temperatureD = readThermister(TEMP_D_PIN);
+    float temperatureA = 10.1F;
+    float temperatureB = 10.2F;
+    float temperatureC = 10.3F;
+    float temperatureD = 10.4F;
+//    float temperatureA = readThermister(TEMP_A_PIN);
+//    float temperatureB = readThermister(TEMP_B_PIN);
+//    float temperatureC = readThermister(TEMP_C_PIN);
+//    float temperatureD = readThermister(TEMP_D_PIN);
     //Serial.print(F("DistanceA=")); Serial.println(distanceA);
     //Serial.print(F("DistanceB=")); Serial.println(distanceB);
     //Serial.print(F("tempA=")); Serial.println(temperatureA);
@@ -228,19 +246,30 @@ void loop() {
 //    sampleTime+=(LOGINTERVAL*10L);        //add interval, so interval is precise
     sampleTime+=LOG_INTERVAL;        //add interval, so interval is precise
   }
+  
   checkwifi();  
 
-  if(millis()>wifiLogTime){   //if it's been more than logging interval
-    logWiFiStatusToCard();
-    wifiLogTime += WIFI_LOG_INTERVAL;
-  }
-
-  if(millis()>wifiResetTime){   //if it's been more than logging interval
-    wifiResetServer();
-    wifiResetTime += WIFI_RESET_INTERVAL;
-  }
 }
 
+
+
+
+void errorflash(int n){           //non-recoverable error, flash code on LED1
+  //WIFI.print(F("error flash:"));
+  //WIFI.println(n);
+  status=n;                       //set status for webpage
+  pinMode(LED1,OUTPUT);
+  while(1){                       //do until reset
+    for(int i=0;i<n;i++){         //flash n times
+      digitalWrite(LED1,HIGH);
+      delay(500);
+      digitalWrite(LED1,LOW);
+      delay(300);      
+      checkwifi();                //wifi services still available during fault
+    }
+    delay(1000);                  //pause and repeat
+  }  
+}
 
 
 File openDataFile(){      //put the column headers you would like here, if you don't want headers, comment out the line below
@@ -321,151 +350,8 @@ void logtocard(float temperatureA, float temperatureB, float temperatureC, float
   digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
 }
 
-void debugWiFi( int c){
-  #if WIFI_DEBUG
-    File auditFile = debugWiFiOpenFile();
-    auditFile.write(c);
-    auditFile.close();                         //close file so data is saved
-  #endif
-}
-
-void debugWiFi(const char *message){
-  #if WIFI_DEBUG
-    File auditFile = debugWiFiOpenFile();
-    auditFile.write(message);
-    auditFile.write('\n');
-    auditFile.close();                         //close file so data is saved
-  #endif
-}
-
-void debugWiFi(const char *message, int len){
-  #if WIFI_DEBUG
-    File auditFile = debugWiFiOpenFile();
-    auditFile.write(message, len);
-    auditFile.write('\n');
-    auditFile.close();                         //close file so data is saved
-  #endif
-}
-
-void debugWiFi(const __FlashStringHelper *messageF){
-  #if WIFI_DEBUG
-    File auditFile = debugWiFiOpenFile();
-    char message[strlen_PF(messageF) + 1];
-    strcpy_PF( message, messageF);
-    auditFile.write(message);
-    auditFile.write('\n');
-    auditFile.close();                         //close file so data is saved
-  #endif
-}
-
-File debugWiFiOpenFile(){
-  int i = strlen_PF(F("WIFI.AUD"));
-  char filename[i + 1];
-  strcpy_PF( filename, F("WIFI.AUD"));
-  return SD.open( filename, FILE_WRITE);
-}
-
-void logWiFiStatusToCard(){
-  unsigned long timestamp;
-  DateTime now = rtc.now();                   //capture time
-  lastSampleTimeUnix = now.unixtime();
-  digitalWrite(LED2,HIGH);                    //turn on LED to show card in use
-  delay(200);                                 //a bit of warning that card is being accessed, can be reduced if faster sampling needed
-  
-  strcpy_PF(pktbuf, F("WIFI.LOG"));
-  File fhandle = SD.open(pktbuf, FILE_WRITE);
-  if(!fhandle){                     // Cannot open the file, raise an error.
-    errorflash(6);
-  }
-
-  unsigned long s;
-    
-  // Timestamp format ISO 8601: 2017-12-26T07:44:19+10
-  fhandle.print(F("\r\n================\r\n== Status Time: "));
-  sprintf_P(pktbuf, XML_DATE, now.year(), now.month(), now.day());
-  fhandle.print(pktbuf);
-  fhandle.print(F("T"));
-  sprintf_P(pktbuf, XML_TIME, now.hour(),now.minute(),now.second());
-  fhandle.println(pktbuf);
-  fhandle.print(F("Free Memory: "));
-  sprintf_P(pktbuf, XML_INT, freeMemory());
-  fhandle.println(pktbuf);
-
-  fhandle.println(F("IP Connection Status"));
-  clearPktbuf();
-
-  int len = strlen_PF(AT_REPLY_OK) + 1;
-  char replyStr[len];
-  strcpy_PF(replyStr,AT_REPLY_OK);
-
-  WIFI.println(AT_CMD_WIFI_STATUS);
-  logResponseToFile( fhandle, replyStr);
-
-  fhandle.println(F("AP Status"));
-  WIFI.println(AT_CMD_GET_AP_CFG_FLASH);
-//  WIFI.println(AT_CMD_AP_STATUS);
-  logResponseToFile( fhandle, replyStr);
-/*
-  fhandle.println(F("AP Free RAM"));
-  WIFI.println(AT_CMD_GET_FREE_RAM);
-  logResponseToFile( fhandle, replyStr);
-
-  fhandle.println(F("Ping AP"));
-  WIFI.println(AT_CMD_PING_AP);
-  logResponseToFile( fhandle, replyStr);
-
-  fhandle.println(F("List APs"));
-  WIFI.println(AT_CMD_AP_PASSIVE_SCAN);
-  logResponseToFile( fhandle, replyStr);
-*/
-/*
-  fhandle.println(F("Station List"));
-  WIFI.println(AT_CMD_GET_STATION_LIST_MODE);
-  logResponseToFile( fhandle, replyStr);
-*/
-  fhandle.close();                            //close file so data is saved
-  digitalWrite(LED2,LOW);                     //turn off LED card to show card closed
-}
-
-void logResponseToFile( File fhandle, char *replyStr) {
-  unsigned long timeout = 10000 + millis();
-  clearPktbuf();
-  while(millis()< timeout && !strContains(pktbuf, replyStr)){          //until timeout
-    while(WIFI.available()){
-      int c = WIFI.read();
-      if(c != -1){             //response good
-        addtobuffer(pktbuf,PKTSIZE,c);      //add to buffer
-        if(c == '\n') {
-          fhandle.print(pktbuf);
-          clearPktbuf();
-        }
-      }
-    }
-  }
-  WIFIpurge();              //clear incoming buffer
-}
-
-
-void errorflash(int n){           //non-recoverable error, flash code on LED1
-  WIFI.print(F("error flash:"));
-  WIFI.println(n);
-  status=n;                       //set status for webpage
-  pinMode(LED1,OUTPUT);
-  while(1){                       //do until reset
-    for(int i=0;i<n;i++){         //flash n times
-      digitalWrite(LED1,HIGH);
-      delay(500);
-      digitalWrite(LED1,LOW);
-      delay(300);      
-      checkwifi();                //wifi services still available during fault
-    }
-    delay(1000);                  //pause and repeat
-  }  
-}
-
-
 void dorequest(int messageLength){
-  unsigned long t;                     //timeout
+//  unsigned long t;                     //timeout
   int p=0;                             //pointer to getreq position
   int f=1;                             //flag to tell if first line or not
   int crcount=0;                       //if we get two CR/LF in a row, request is complete
@@ -473,33 +359,34 @@ void dorequest(int messageLength){
 
   clearPktbuf();
   int bytesRead = WIFI.readBytes(pktbuf, min( messageLength, sizeof(pktbuf) - 1));
-  sprintf(lengthStr, "\nbytesRead %d", messageLength);
-  debugWiFi(lengthStr);
-  debugWiFi( pktbuf, lengthStr);
+  //sprintf(lengthStr, "\nbytesRead %d", bytesRead);
+  //WIFI.println(lengthStr);
+  //WIFI.print(F("doReq: "));
+  //WIFI.println(pktbuf);
 
-  if( bytesRead < messageLength) {
-    WIFIpurge();
+  // Read all the remaining characters off the serial port
+  unsigned long timeout = 1000 + millis();
+  while(bytesRead < messageLength && millis() < timeout) {
+    if(WIFI.read() != -1) {
+      bytesRead++; 
+    }
   }
 
   strcpy_PF( lengthStr, HTTP_HEADER_PROTOCOL);
   if( ! strContains(pktbuf, lengthStr)) {
-    debugWiFi(F("*HTTP/ missing"));
     wifiResetTime -= (WIFI_RESET_INTERVAL / 5);
     return;
   }
 
-
   crcount = strContains(pktbuf, "\r");
 
   fname[0]=0;                                              //blank
-
   if( strncmp_P(pktbuf, HTTP_HEADER_GET, strlen_P(HTTP_HEADER_GET)) == 0) {
     //If 'GET ' at the start, so change flag to0
     crcount=1;
     parseFileName(pktbuf);                                                       //complete request found, extract name of requested file
-  }   
-  debugWiFi(F("fname; "));
-  debugWiFi(fname);
+  }
+
   if(fname[0]==0 || strcmp_P(fname,URL_FILE_INDEX_1) == 0 || strcmp_P(fname,URL_FILE_INDEX_2) == 0){
     servePage();
     sendStatus();
@@ -518,7 +405,7 @@ void dorequest(int messageLength){
   } else if(strcmp_P(fname, URL_API_OUTSIDE) == 0){
     getOutsideClimate();
     crcount=0;
-  } else if(strncmp_P(pktbuf, URL_FILE_DELETE, strlen_P(URL_FILE_DELETE)) == 0) {
+  } else if(strncmp_P(fname, URL_FILE_DELETE, strlen_P(URL_FILE_DELETE)) == 0) {
     deleteFile(fname + strlen_P(URL_FILE_DELETE));
     listPage();
     sendStatus();
@@ -527,7 +414,7 @@ void dorequest(int messageLength){
     crcount = sendFile(fname);                       //serve entire data file
   }
 
-  if(crcount){serve404();sendStatus();}             //no valid file served => 404 error
+  if(crcount) {serve404();sendStatus();}             //no valid file served => 404 error
 
   delay(100);
   WIFI.print(AT_CMD_CLOSE);                         //close
@@ -557,6 +444,10 @@ void parseFileName(char *requestLine){
 
 void sendStatus(){                                   //to show logger status
   DateTime now = rtc.now();
+
+  //DateTime now = rtc.isrunning() ? rtc.now() : DateTime(dummy_t);
+  //uint32_t dummy_t = 0;
+  //DateTime now = DateTime(dummy_t);
 
   WIFI.print(AT_CMD_SEND);                           //send data
   WIFI.print(cxn);                                   //to client
@@ -598,25 +489,23 @@ void servePage(){                                     //for serving a page of da
 void listPage(){                                     //for serving a page of data
   WIFIsenddata(HTTPLIST, cxn);
 
-  debugWiFi(F("lf1 fm;"));
-  sprintf_P(pktbuf, XML_INT, freeMemory());
-  debugWiFi(pktbuf);
+//  debugWiFi(F("lf1 fm;"));
+//  sprintf_P(pktbuf, XML_INT, freeMemory());
+//  debugWiFi(pktbuf);
 
 //  File root = SD.open("/",FILE_READ);
 //  root.seek(0);
   File root = SD.open("/");
-  debugWiFi(F("lf2 fm;"));
-  sprintf_P(pktbuf, XML_INT, freeMemory());
-  debugWiFi(pktbuf);
+//  debugWiFi(F("lf2 fm;"));
+//  sprintf_P(pktbuf, XML_INT, freeMemory());
+//  debugWiFi(pktbuf);
  
   int sendLength = -1;
   clearPktbuf();
 
   while (true) {
     File entry =  root.openNextFile();
-  debugWiFi(F("lf3 fm;"));
-  sprintf_P(pktbuf, XML_INT, freeMemory());
-  debugWiFi(pktbuf);
+
     if (! entry) {
 //      WIFI.print(F("-nf"));
       // no more files
@@ -648,12 +537,8 @@ void listPage(){                                     //for serving a page of dat
 }
 
 void deleteFile(char* filename) {
-  debugWiFi(F("delete file;"));
-  debugWiFi(filename);
   bool result = SD.remove(filename);
-  debugWiFi( (result) ? F("Y") : F("N"));
 }
-
 
 void displayWiFiStatus() {
   WIFIsenddata(HTTPWIFI_STATUS_1, cxn);
@@ -755,8 +640,17 @@ int sendFile(char *filename){             //for providing a csv document to down
 }
 
 void getWaterTankLevels(){                                     //Returns JSON with the current levels of the water tanks.
-  int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M);
-  int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M);
+  
+   usonicSetup(USONIC_1_TRIG, USONIC_1_ECHO); //set up ultrasonic sensor
+   selectDigitalDevice(1);
+   delay(100);
+   int distanceA=usonicRead(USONIC_1_TRIG, USONIC_1_ECHO, US_TIMEOUT_2_5M);
+
+  
+   usonicSetup(USONIC_2_TRIG, USONIC_2_ECHO); //set up ultrasonic sensor
+   selectDigitalDevice(1);
+   delay(100);
+   int distanceB=usonicRead(USONIC_2_TRIG, USONIC_2_ECHO, US_TIMEOUT_2_5M);
 
   sprintf_P(pktbuf, API_WATER_TANK_DATA, distanceA, distanceB);
   wiFiSendStart(cxn, strlen_PF(HTTPJSON)+strlen(pktbuf));
@@ -766,7 +660,13 @@ void getWaterTankLevels(){                                     //Returns JSON wi
 }
 
 void getOutsideClimate(){                      //Returns JSON with the current tempreture, humidity etc.
-  dht11Response_t dht11Response = readDHT11(DHT11PIN); //returns status 1 on ok, 0 on fail (eg checksum, data not received)
+
+   setupDHT11(D_Y);           //start temp/humidity sensor
+   selectDigitalDevice(2);
+   delay(500);
+   dht11Response_t dht11Response = readDHT11(D_Y);     //fetch data to log
+  
+  //dht11Response_t dht11Response = readDHT11(DHT11PIN); //returns status 1 on ok, 0 on fail (eg checksum, data not received)
   int light = -1;
   //int light=analogRead(LIGHTPIN);                //get light sensor data
 
@@ -791,16 +691,14 @@ void wifiinit(){
 
   // Set default ip address
   if( !checkWifiConfig(AT_CMD_GET_IP_CFG_FLASH, WIFI_IP, AT_REPLY_OK)) {
-    WIFIcmd(AT_CMD_SET_IP, AT_REPLY_OK, 1000);
+    WIFIcmd(AT_CMD_SET_IP, AT_REPLY_OK, 10000);
   }
-
+  
   bool apSet = false;
   for( int cnt = 0; cnt < 5 && ! apSet; cnt++) {
     if( checkWifiConfig(AT_CMD_GET_AP_CFG_FLASH, WIFI_SSID, AT_REPLY_OK)) {
-    ///WIFI.println("OK-");
       apSet = true;
     } else {
-    //WIFI.println("FAIL-");
       delay(1000);
     }
   }
@@ -814,10 +712,11 @@ void wifiinit(){
   }
 
   wifiConfigServer();
+
+
 }
 
 void wifiResetServer() {
-  debugWiFi(F("== Daily reset"));
   WIFIcmd(F("AT+RST"), AT_REPLY_READY, 10000);
   delay(10000);
   wifiConfigServer();
@@ -846,10 +745,7 @@ bool checkWifiConfig(const __FlashStringHelper *commandF, const __FlashStringHel
     while(WIFI.available()){
       int c = WIFI.read();
       if(c != -1){             //response good
-        debugWiFi(c);
         if(c== '\n') {
-//          WIFI.print(F("resp- "));
-//          WIFI.println(pktbuf);
           if( strContains(pktbuf, successStr)) {
             WIFIpurge();
             return true;
@@ -881,8 +777,7 @@ bool checkWifiConfigEcho(const __FlashStringHelper *commandF, const __FlashStrin
     while(WIFI.available()){
       int c = WIFI.read();
       if(c != -1){             //response good
-        debugWiFi(c);
-        if(c== '\n') {
+        if(c == '\n') {
           WIFI.print(F("resp- "));
           WIFI.println(pktbuf);
           if( strContains(pktbuf, successStr)) {
@@ -897,66 +792,78 @@ bool checkWifiConfigEcho(const __FlashStringHelper *commandF, const __FlashStrin
     }
   }
   WIFIpurge();
+          WIFI.print(F("TO resp- "));
+          WIFI.println(pktbuf);
+  WIFI.println(F("TO-"));
 
   return false;
 }
 
 void checkwifi(){
+  if( !WIFI.available()) {
+    return;
+  }
+
   clearPktbuf();
   int messageLength = -1;
-  unsigned long timeout = millis() + 100;
+  unsigned long timeout = millis() + 1000;
+  bool readData = true;
+  
+  while(readData && timeout > millis()){                    //check if any data from WIFI
+    if( WIFI.available()) {
+       int b = WIFI.read();
 
-  while(WIFI.available()
-     || (strlen( pktbuf) > 0 && timeout < millis())){                    //check if any data from WIFI
-    int b = WIFI.read();
-    debugWiFi(b);
+       // If there is a newline then the data is trash, not a message.
+       if(b == '\n') {
+         clearPktbuf();
+         return;
+       }
 
-    if(b == '\n') {
-      clearPktbuf();
-      return;
-    }
+      addtobuffer(pktbuf,PKTSIZE,b);      //add to buffer
+      //WIFI.print(F("xxx; "));
+      //WIFI.println(pktbuf);
 
-    addtobuffer(pktbuf,PKTSIZE,b);      //add to buffer
-    //WIFI.print(F("xxx; "));
-    //WIFI.println(pktbuf);
-
-    if(b == ':') {
+      if(b == ':') {
+        //WIFI.print(F("xxx; "));
+        //WIFI.println(pktbuf);
       
-      char recvCmd[strlen_PF(AT_CMD_RECV) + 1];
-      strcpy_PF(recvCmd,AT_CMD_RECV);
-      if(strContains(pktbuf, recvCmd)) {
-        // Just received data command: +IPD,0,n:    
-        int i = strlen(recvCmd);         
-        //String conv = String();
+        char recvCmd[strlen_PF(AT_CMD_RECV) + 1];
+        strcpy_PF(recvCmd,AT_CMD_RECV);
+        if(strContains(pktbuf, recvCmd)) {
+          // Just received data command: +IPD,0,n:    
+          int i = strlen(recvCmd);         
         
-        // Get the link id.
-        if( !isDigit(pktbuf[i])) {
-          cxn = -1;
-          return;
-        }
+          // Get the link id.
+          if( !isDigit(pktbuf[i])) {
+            cxn = -1;
+            return;
+          }
 
-        cxn = atoi(&pktbuf[i]);
-        //WIFI.print(F("Cxn; "));
-        //WIFI.println(cxn);
+          cxn = atoi(&pktbuf[i]);
+          //WIFI.print(F("Cxn; "));
+          //WIFI.println(cxn);
 
-        // Get the length of the message
-        i++; // move past the comma ,
-        while(pktbuf[i] != 0 && pktbuf[i] != ',') {
-          i++;
-        }
-        i++; // move past the comma ,
-        if( !isDigit(pktbuf[i])) {
-          cxn = -1;
-          return;
-        }
-        messageLength = atoi(&pktbuf[i]);
-        //WIFI.print(F("messageLength; "));
-        //WIFI.println(messageLength);
+          // Get the length of the message
+          i++; // move past the comma ,
+          while(pktbuf[i] != 0 && pktbuf[i] != ',') {
+            i++;
+          }
+          i++; // move past the comma ,
+          if( !isDigit(pktbuf[i])) {
+            cxn = -1;
+            return;
+          }
+          messageLength = atoi(&pktbuf[i]);
+          //WIFI.print(F("messageLength; "));
+          //WIFI.println(messageLength);
 
-        // Read all the data
-        digitalWrite(LED2,HIGH);
-        dorequest(messageLength);
-        digitalWrite(LED2,LOW);
+          // Read all the data
+          digitalWrite(LED2,HIGH);
+          dorequest(messageLength);
+          digitalWrite(LED2,LOW);
+          clearPktbuf();
+          readData = false;
+        }
       }   
     }
   }
@@ -966,11 +873,11 @@ bool readLine(unsigned long timeoutTime){
   clearPktbuf();
   int messageLength = -1;
 
-  while(timeoutTime < millis()){                    //check if any data from WIFI
+  while(timeoutTime > millis()){                    //check if any data from WIFI
     while(WIFI.available()){                        //check if any data from WIFI
       int b = WIFI.read(); 
 
-      if(b == '\n') {
+      if(b == '\n' && strlen(pktbuf) > 0) {
         return true;
       } else if( b != '\r') {
         addtobuffer(pktbuf,PKTSIZE,b);      //add to buffer
@@ -981,17 +888,47 @@ bool readLine(unsigned long timeoutTime){
   return false;
 }
 
+bool readLineEcho(unsigned long timeoutTime){
+  clearPktbuf();
+  int messageLength = -1;
+
+  while(timeoutTime > millis()){                    //check if any data from WIFI
+    while(WIFI.available()){                        //check if any data from WIFI
+      int b = WIFI.read(); 
+
+      if(b == '\n' && strlen(pktbuf) > 0) {
+    WIFI.print(F("SUC RL = "));
+    WIFI.println(pktbuf);
+        return true;
+      } else if( b != '\r') {
+        addtobuffer(pktbuf,PKTSIZE,b);      //add to buffer
+      }
+    }
+  }
+    WIFI.print(F("TO RL = "));
+    WIFI.println(pktbuf);
+
+  return false;
+}
 
 int WIFIcmd(const __FlashStringHelper *c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
-  debugWiFi(c);
   WIFI.println(c);
   return wiFiWaitForReplyLine(reply, timeout);
 }
 
 int WIFIcmd(const char* c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
-  debugWiFi(c);
   WIFI.println(c);
   return wiFiWaitForReplyLine(reply, timeout);
+}
+
+int WIFIcmdEcho(const __FlashStringHelper *c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  WIFI.println(c);
+  return wiFiWaitForReplyLineEcho(reply, timeout);
+}
+
+int WIFIcmdEcho(const char* c, const __FlashStringHelper *reply, long timeout){   //command c (nocrlf needed), returns true if response r received, otherwise times out
+  WIFI.println(c);
+  return wiFiWaitForReplyLineEcho(reply, timeout);
 }
 
 void WIFIpurge(){                         //empty serial buffer
@@ -1087,154 +1024,31 @@ int wiFiWaitForReplyLine(const __FlashStringHelper *replyStrF, unsigned long tim
   return 0;       //response not found
 }
 
-// =================================================================
-// == 
-// == Functions for reading data from sensors.
-// == 
-// =================================================================
+int wiFiWaitForReplyLineEcho(const __FlashStringHelper *replyStrF, unsigned long timeout){
+  int len = strlen_PF(replyStrF) + 1;
+  char replyStr[len];
+  strcpy_PF(replyStr,replyStrF);
 
-double readThermister(int pin) {
-  int rawADC;
-  double temp;
-  rawADC = analogRead(pin);
-  temp = log(((10240000/rawADC) - 10000));
-  temp = 1 / (0.001129148 + (0.000234125 + (0.0000000876741 * temp * temp ))* temp );
-  temp = temp - 273.15; // Convert Kelvin to Celcius
-  return temp;
-}
+  char errorStr[len];
+  strcpy_PF(replyStr,replyStrF);
 
-void setupDHT11( int pin){                    //set pin to output, set high for idle state
-  pinMode( pin, OUTPUT);
-  digitalWrite( pin, HIGH);
-}
+  timeout+=millis();
 
-byte readDHT11Byte(int pin) {
-  byte data;
-  for (int i = 0; i < 8; i ++) {
-    if (digitalRead( pin) == LOW) {
-      while (digitalRead( pin) == LOW); // wait for 50us
-      delayMicroseconds(30); // determine the duration of the high level to determine the data is '0 'or '1'
-      if (digitalRead( pin) == HIGH)
-        data |= (1 << (7-i)); // high front and low in the post
-      while (digitalRead( pin) == HIGH); // data '1 ', wait for the next one receiver
-     }
-  }
-  return data;
-}
-
-dht11Response_t readDHT11new( int pin){        //returns status 1 on ok, 0 on fail (eg checksum, data not received)
-  byte p=0;                     //pointer to current bit
-  unsigned long t;              //time
-  byte old=0;
-  byte newd;
-  dht11Response_t response;
-  response.status = 0;
-  response.temperature = -1;
-  response.humidity = -1;
-
-  digitalWrite(pin, LOW); // bus down, send start signal
-  delay (30); // delay greater than 18ms, so DHT11 start signal can be detected
- 
-  digitalWrite (pin, HIGH);
-  delayMicroseconds (40); // Wait for DHT11 response
- 
-  pinMode (pin, INPUT);
-  while (digitalRead (pin) == HIGH);
-  delayMicroseconds (80); // DHT11 response, pulled the bus 80us
-  if (digitalRead (pin) == LOW);
-  delayMicroseconds (80); // DHT11 80us after the bus pulled to start sending data
- 
-  byte data[5]={0,0,0,0,0};
-
-  for (int i = 0; i < 4; i ++) // receive temperature and humidity data, the parity bit is not considered
-    data[i] = readDHT11Byte( pin);
-
-  //DHTtemp=data[2];
-  //DHThum=data[0];
-  response.status = 1;
-  response.temperature = data[2];        //temperature
-  response.humidity = data[0];           //humidity
-  return response;                       //data valid
-}
-
-dht11Response_t readDHT11( int pin){        //returns status 1 on ok, 0 on fail (eg checksum, data not received)
-  unsigned int n[83];           //to store bit times
-  byte p=0;                     //pointer to current bit
-  unsigned long t;              //time
-  byte old=0;
-  byte newd;
-  dht11Response_t response;
-  response.status = 0;
-  response.temperature = -1;
-  response.humidity = -1;
-  //char lengthStr[10];
-
-  for(int i=0;i<83;i++){n[i]=0;}
-  digitalWrite(pin,LOW);                //start signal
-  //delay(30);
-  delay(25);
-  digitalWrite(pin,HIGH);
-  delayMicroseconds(20);
-  //delayMicroseconds(80);
-  pinMode(pin,INPUT);
-  delayMicroseconds(40);
-  t=micros()+10000L;
-  while((micros()<t)&&(p<83)){          //read bits
-    newd=digitalRead(pin);
-    if(newd!=old){
-      n[p]=micros();
-      p++;
-      old=newd;
+  while(readLine(timeout)){
+    if(strContains(pktbuf, replyStr)) {
+      WIFI.print(F("SUC resp- "));
+      WIFI.println(pktbuf);
+      return 1;
     }
+      WIFI.print(F("resp ln- "));
+      WIFI.println(pktbuf);
   }
-  pinMode(pin,OUTPUT);                  //reset for next cycle
-  digitalWrite(pin,HIGH);
 
-  //sprintf(lengthStr, "DHT p=%x", p);
-  //debugWiFi(lengthStr);
-
-  if(p!=83){return response;}           //not a valid datastream
-  byte data[5]={0,0,0,0,0};
-  for(int i=0;i<40;i++){                //store data in array
-    if(n[i*2+3]-n[i*2+2]>50){data[i>>3]=data[i>>3]|(128>>(i&7));}
-  }
-  byte k=0;                              //checksum
-  for(int i=0;i<4;i++){k=k+data[i];}
-  if((k^data[4])){return response;}      //checksum error
-  //DHTtemp=data[2];
-  //DHThum=data[0];
-  response.status = 1;
-  response.temperature = data[2];        //temperature
-  response.humidity = data[0];           //humidity
-  return response;                       //data valid
+  WIFI.print(F("TO resp- "));
+  WIFI.println(pktbuf);
+  return 0;       //response not found
 }
 
-void usonicSetup(int trigPin, int echoPin){
-  pinMode(echoPin, INPUT_PULLUP);
-  pinMode(trigPin, OUTPUT);
-  digitalWrite(trigPin, LOW);
-}
-
-int usonicRead(int trigPin, int echoPin, long utimeout){ //utimeout is maximum time to wait for return in us
-  long b;
-  if(digitalRead(echoPin)==HIGH){return -1;} //if echo line is still low from last result, return 0;
-
-  digitalWrite(trigPin, LOW); // Set the trigger pin to low for 2uS 
-/*
-  delayMicroseconds(2);
-    
-  digitalWrite(trigPin, HIGH); // Send a 10uS high to trigger ranging 
-  delayMicroseconds(20); 
-    
-  digitalWrite(trigPin, LOW); // Send pin low again 
-  int distance = pulseIn(echoPin, HIGH, 26000); // Read in times pulse 
-    
-  distance = distance / 58; //Convert the pulse duration to distance
-       
-  return distance;
-  */
-  return 50;
-}
 
 
 // =================================================================
@@ -1252,55 +1066,4 @@ void displayFreeMemory(const __FlashStringHelper *msg) {
 
 void clearPktbuf(){
   memset(pktbuf, 0, sizeof(pktbuf));
-}
-
-
-int addtobuffer(char buf[], int bufsize, char str[]){      //add str to end of buf, limited by bufsize
-  int p=0;
-  int k=strlen(buf);
-  while((k+p<bufsize-1)&&str[p]){                          //while there's room
-    buf[p+k]=str[p];                                       //add character
-    p++;
-  }
-  buf[p+k]=0;                                              //terminate array
-  return p;                                                //number of characters added
-}
-
-int addtobuffer(char buf[], int bufsize, char str){       //add char to end of buf, limited by bufsize
-  int k=strlen(buf);
-  if(k<bufsize-1){                                        //if there's room for one more
-    buf[k]=str;                                           //add it
-    buf[k+1]=0;
-    return 1;                                             //1 character added
-  }
-  return 0;
-}
-
-// searches for the string sfind in the string str
-// returns 1 if string found
-// returns 0 if string not found
-int strContains(char *str, char *sfind) {
-    int found = 0;
-    int index = 0;
-    int len;
-
-    len = strlen(str);
-    
-    if (strlen(sfind) > len) {
-        return 0;
-    }
-    while (index < len) {
-        if (str[index] == sfind[found]) {
-            found++;
-            if (strlen(sfind) == found) {
-                return 1;
-            }
-        }
-        else {
-            found = 0;
-        }
-        index++;
-    }
-
-    return 0;
 }
