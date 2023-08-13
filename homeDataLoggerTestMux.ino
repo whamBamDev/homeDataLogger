@@ -51,7 +51,7 @@ const char STATUS_TEXT2[] PROGMEM = "Last sample taken at: %04d-%02d-%02d %02d:%
 #define A_A A1
 #define A_B A2
 #define A_C A3
-#define A_DISABLE A4
+#define A_DISABLE 2
 
 
 #define D_X 8
